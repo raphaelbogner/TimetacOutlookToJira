@@ -1,6 +1,26 @@
 // lib/services/ics_parser.dart
 import 'dart:convert';
 
+import 'package:flutter_jira_timetac/models/models.dart';
+
+// =======================================================
+//                Configurable Non-Meeting Hints
+// =======================================================
+List<String> _nonMeetingHints = SettingsModel.defaultNonMeetingHintsList;
+
+// Version-Token für Cache-Invalidierung
+int _hintsVersionGlobal = 0;
+
+/// Von außen aufrufbar: setzt Hints und invalidiert interne Caches.
+void setNonMeetingHints(List<String> hints) {
+  _nonMeetingHints = hints.map((e) => e.trim().toLowerCase()).where((e) => e.isNotEmpty).toList(growable: false);
+  _hintsVersionGlobal++; // Caches merken Änderung
+  _dayCache.onHintsChanged(); // Day-Cache leeren
+  _fastCache.onHintsChanged(); // Range-Cache leeren
+}
+
+List<String> getNonMeetingHints() => List.unmodifiable(_nonMeetingHints);
+
 // =======================================================
 //                 ICS DATA STRUCTURES
 // =======================================================
@@ -395,9 +415,23 @@ class DayCalendar {
 
 class _IcsDayCache {
   final Map<int, DayCalendar> _cache = <int, DayCalendar>{};
+
+  // lokale Version, um bei Änderungen zu invalidieren
+  int _hintsVersionLocal = _hintsVersionGlobal;
+
   void clear() => _cache.clear();
 
+  // vom Setter aufgerufen
+  void onHintsChanged() {
+    _hintsVersionLocal = _hintsVersionGlobal;
+    clear();
+  }
+
   DayCalendar getOrCompute(List<IcsEvent> allEvents, DateTime day) {
+    if (_hintsVersionLocal != _hintsVersionGlobal) {
+      onHintsChanged();
+    }
+
     final key = DateTime(day.year, day.month, day.day).millisecondsSinceEpoch;
     final cached = _cache[key];
     if (cached != null) return cached;
@@ -439,30 +473,7 @@ class _IcsDayCache {
       if (e.attendeeCount == 0) return false;
 
       final title = e.summary.trim().toLowerCase();
-      const nonMeetingHints = <String>[
-        'homeoffice',
-        'an anderem ort tätig',
-        'im büro',
-        'im office',
-        'office',
-        'büro',
-        'arbeitsort',
-        'arbeitsplatz',
-        'standort',
-        'working elsewhere',
-        'focus',
-        'focus time',
-        'fokuszeit',
-        'reise',
-        'anreise',
-        'commute',
-        'fahrt',
-        'fahrtzeit',
-        'travel',
-        'anwesenheit',
-        'präsenz',
-      ];
-      if (title.isEmpty || nonMeetingHints.any((k) => title.contains(k))) return false;
+      if (title.isEmpty || _nonMeetingHints.any((k) => title.contains(k))) return false;
 
       final s = e.start.isBefore(from) ? from : e.start;
       final ed = e.end.isAfter(to) ? to : e.end;
@@ -538,6 +549,8 @@ class _UserRangeCache {
   DateTime? _to; // inclusive 23:59:59.999
   final Map<int, List<IcsEvent>> _bucket = <int, List<IcsEvent>>{};
 
+  int _hintsVersionLocal = _hintsVersionGlobal;
+
   void clear() {
     _userEmail = '';
     _from = null;
@@ -545,9 +558,15 @@ class _UserRangeCache {
     _bucket.clear();
   }
 
+  void onHintsChanged() {
+    _hintsVersionLocal = _hintsVersionGlobal;
+    clear();
+  }
+
   bool _sameUser(String email) => _userEmail == email.trim().toLowerCase();
 
   bool covers(DateTime day, String userEmail) {
+    if (_hintsVersionLocal != _hintsVersionGlobal) return false;
     if (!_sameUser(userEmail)) return false;
     if (_from == null || _to == null) return false;
     final d0 = DateTime(day.year, day.month, day.day);
@@ -566,6 +585,10 @@ class _UserRangeCache {
     required DateTime from,
     required DateTime to,
   }) {
+    if (_hintsVersionLocal != _hintsVersionGlobal) {
+      onHintsChanged();
+    }
+
     clear();
     _userEmail = userEmail.trim().toLowerCase();
     _from = DateTime(from.year, from.month, from.day);
@@ -604,30 +627,7 @@ class _UserRangeCache {
       if (ps != null && ps != 'NEEDS-ACTION' && ps != 'ACCEPTED') continue;
 
       final title = e.summary.trim().toLowerCase();
-      const nonMeetingHints = <String>[
-        'homeoffice',
-        'an anderem ort tätig',
-        'im büro',
-        'im office',
-        'office',
-        'büro',
-        'arbeitsort',
-        'arbeitsplatz',
-        'standort',
-        'working elsewhere',
-        'focus',
-        'focus time',
-        'fokuszeit',
-        'reise',
-        'anreise',
-        'commute',
-        'fahrt',
-        'fahrtzeit',
-        'travel',
-        'anwesenheit',
-        'präsenz',
-      ];
-      if (title.isEmpty || nonMeetingHints.any((k) => title.contains(k))) continue;
+      if (title.isEmpty || _nonMeetingHints.any((k) => title.contains(k))) continue;
 
       final start = e.start.isBefore(_from!) ? _from! : e.start;
       final end = e.end.isAfter(_to!) ? _to! : e.end;

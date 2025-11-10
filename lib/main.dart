@@ -58,12 +58,14 @@ class AppState extends ChangeNotifier {
         settings = SettingsModel.fromJson(jsonDecode(jsonStr) as Map<String, dynamic>);
       } catch (_) {}
     }
+    setNonMeetingHints(settings.nonMeetingHintsList);
     notifyListeners();
   }
 
   Future<void> savePrefs() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('settings', jsonEncode(settings.toJson()));
+    setNonMeetingHints(settings.nonMeetingHintsList);
     notifyListeners();
   }
 
@@ -871,12 +873,25 @@ class _HomePageState extends State<HomePage> {
     final glProjCtl = TextEditingController(text: s.gitlabProjectIds);
     final glMailCtl = TextEditingController(text: s.gitlabAuthorEmail);
 
+    // Non-Meeting-Hints: Defaults + aktiver Zustand + Custom-Controller
+    const defaultsNonMeeting = SettingsModel.defaultNonMeetingHintsList;
+    final activeHintsInit = s.nonMeetingHintsList.toSet();
+
+    // aktive Defaults = Schnittmenge von aktiven Hints und Default-Liste
+    Set<String> activeDefaults = defaultsNonMeeting.where((d) => activeHintsInit.contains(d)).toSet();
+
+    // Custom-Hints = alles was aktiv ist, aber kein Default ist
+    List<TextEditingController> customHintCtrls = activeHintsInit
+        .where((h) => !defaultsNonMeeting.contains(h))
+        .map((h) => TextEditingController(text: h))
+        .toList();
+
     await showDialog(
       context: context,
       useSafeArea: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlg) => DefaultTabController(
-          length: 3,
+          length: 4,
           child: LayoutBuilder(
             builder: (c, cons) {
               final media = MediaQuery.of(c);
@@ -954,6 +969,10 @@ class _HomePageState extends State<HomePage> {
                               const SizedBox(width: 6),
                               const Text('GitLab'),
                             ])),
+                            const Tab(
+                                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              Text('Non-Meeting Keywords'),
+                            ])),
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -968,6 +987,7 @@ class _HomePageState extends State<HomePage> {
                                 // ------- JIRA -------
                                 SingleChildScrollView(
                                   child: Column(
+                                    spacing: 8,
                                     children: [
                                       sectionTitle(ctx, 'Jira Arbeit'),
                                       TextFormField(
@@ -988,7 +1008,6 @@ class _HomePageState extends State<HomePage> {
                                         obscureText: true,
                                         onChanged: (_) => markRebuild(setDlg),
                                       ),
-                                      const SizedBox(height: 8),
                                       Align(
                                         alignment: Alignment.centerLeft,
                                         child: TextButton.icon(
@@ -1014,6 +1033,7 @@ class _HomePageState extends State<HomePage> {
                                 // ------- TIMETAC -------
                                 SingleChildScrollView(
                                   child: Column(
+                                    spacing: 8,
                                     children: [
                                       sectionTitle(ctx, 'CSV (Timetac) – Importkonfiguration'),
                                       Row(children: [
@@ -1151,6 +1171,7 @@ class _HomePageState extends State<HomePage> {
                                 // ------- GITLAB -------
                                 SingleChildScrollView(
                                   child: Column(
+                                    spacing: 8,
                                     children: [
                                       sectionTitle(ctx, 'GitLab (für Arbeitszeit Ticket-Automatik)'),
                                       TextFormField(
@@ -1170,7 +1191,6 @@ class _HomePageState extends State<HomePage> {
                                         controller: glProjCtl,
                                         onChanged: (_) => markRebuild(setDlg),
                                       ),
-                                      const SizedBox(height: 8),
                                       Align(
                                         alignment: Alignment.centerLeft,
                                         child: TextButton.icon(
@@ -1207,7 +1227,6 @@ class _HomePageState extends State<HomePage> {
                                         obscureText: true,
                                         onChanged: (_) => markRebuild(setDlg),
                                       ),
-                                      const SizedBox(height: 8),
                                       Align(
                                         alignment: Alignment.centerLeft,
                                         child: TextButton.icon(
@@ -1243,6 +1262,130 @@ class _HomePageState extends State<HomePage> {
                                     ],
                                   ),
                                 ),
+
+                                SingleChildScrollView(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    spacing: 8,
+                                    children: [
+                                      sectionTitle(ctx, 'Nicht-Meeting-Titel (eine Zeile pro Stichwort)'),
+                                      const Text(
+                                          'Termine wo diese Phrasen vorkommen, werden ignoriert und nicht als Meeting gezählt.'),
+                                      Container(
+                                        decoration: BoxDecoration(
+                                          border: Border.all(color: Theme.of(ctx).dividerColor),
+                                          borderRadius: BorderRadius.circular(8),
+                                        ),
+                                        child: Column(
+                                          children: [
+                                            Container(
+                                              width: double.infinity,
+                                              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                                              color: Theme.of(ctx).colorScheme.surfaceContainerHighest.withAlpha(102),
+                                              child: const Text(
+                                                'Standard-Begriffe (deaktivierte sind durchgestrichen)',
+                                                style: TextStyle(fontWeight: FontWeight.w600),
+                                              ),
+                                            ),
+                                            for (final hint in defaultsNonMeeting)
+                                              ListTile(
+                                                dense: true,
+                                                title: Text(
+                                                  hint,
+                                                  style: TextStyle(
+                                                    decoration: activeDefaults.contains(hint)
+                                                        ? TextDecoration.none
+                                                        : TextDecoration.lineThrough,
+                                                    color: activeDefaults.contains(hint)
+                                                        ? null
+                                                        : Theme.of(ctx).disabledColor,
+                                                  ),
+                                                ),
+                                                trailing: IconButton(
+                                                  tooltip: activeDefaults.contains(hint)
+                                                      ? 'Diesen Standardbegriff deaktivieren'
+                                                      : 'Diesen Standardbegriff wieder aktivieren',
+                                                  icon: Icon(
+                                                    activeDefaults.contains(hint)
+                                                        ? Icons.remove_circle
+                                                        : Icons.add_circle,
+                                                  ),
+                                                  onPressed: () {
+                                                    if (activeDefaults.contains(hint)) {
+                                                      activeDefaults.remove(hint);
+                                                    } else {
+                                                      activeDefaults.add(hint);
+                                                    }
+                                                    markRebuild(setDlg);
+                                                  },
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+
+                                      const SizedBox(height: 12),
+
+                                      // Eigene (benutzerdefinierte) Begriffe zum Ausschließen
+                                      Container(
+                                        decoration: BoxDecoration(
+                                          border: Border.all(color: Theme.of(ctx).dividerColor),
+                                          borderRadius: BorderRadius.circular(8),
+                                        ),
+                                        child: Column(
+                                          children: [
+                                            Container(
+                                              width: double.infinity,
+                                              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                                              color: Theme.of(ctx).colorScheme.surfaceContainerHighest.withAlpha(102),
+                                              child: Row(
+                                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                                children: [
+                                                  const Text('Eigene Begriffe',
+                                                      style: TextStyle(fontWeight: FontWeight.w600)),
+                                                  TextButton.icon(
+                                                    icon: const Icon(Icons.add),
+                                                    label: const Text('Neue Zeile'),
+                                                    onPressed: () {
+                                                      customHintCtrls.add(TextEditingController());
+                                                      markRebuild(setDlg);
+                                                    },
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            if (customHintCtrls.isEmpty)
+                                              const ListTile(
+                                                dense: true,
+                                                title: Text('Keine eigenen Begriffe angelegt.'),
+                                              ),
+                                            for (int i = 0; i < customHintCtrls.length; i++)
+                                              ListTile(
+                                                dense: true,
+                                                title: TextField(
+                                                  controller: customHintCtrls[i],
+                                                  decoration: const InputDecoration(
+                                                    hintText: 'Begriff, z. B. "focus"',
+                                                    border: InputBorder.none,
+                                                    isDense: true,
+                                                  ),
+                                                  onChanged: (_) => markRebuild(setDlg),
+                                                ),
+                                                trailing: IconButton(
+                                                  tooltip: 'Diese Zeile löschen',
+                                                  icon: const Icon(Icons.delete),
+                                                  onPressed: () {
+                                                    customHintCtrls.removeAt(i);
+                                                    markRebuild(setDlg);
+                                                  },
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                )
                               ],
                             ),
                           ),
@@ -1285,6 +1428,23 @@ class _HomePageState extends State<HomePage> {
                                 st.gitlabToken = glTokCtl.text.trim();
                                 st.gitlabProjectIds = glProjCtl.text.trim();
                                 st.gitlabAuthorEmail = glMailCtl.text.trim();
+
+                                // --- Non-Meeting-Hints speichern ---
+                                // 1) aktive Defaults
+                                final effectiveDefaults =
+                                    defaultsNonMeeting.where((d) => activeDefaults.contains(d)).toList();
+
+                                // 2) valide Custom-Zeilen
+                                final customList = customHintCtrls
+                                    .map((c) => c.text.trim().toLowerCase())
+                                    .where((e) => e.isNotEmpty)
+                                    .toList();
+
+                                // 3) zusammenführen, Reihenfolge: Defaults dann Custom
+                                st.nonMeetingHintsMultiline = [
+                                  ...effectiveDefaults,
+                                  ...customList,
+                                ].join('\n');
 
                                 await context.read<AppState>().savePrefs();
                                 if (context.mounted) Navigator.pop(ctx);
@@ -1602,14 +1762,4 @@ class _HomePageState extends State<HomePage> {
       });
     }
   }
-
-  Icon _settingsIcon(bool ok) =>
-      Icon(ok ? Icons.check_circle : Icons.cancel, color: ok ? Colors.green : Colors.red, size: 16);
-
-  Widget _sectionTitle(BuildContext ctx, String text) => Align(
-      alignment: Alignment.centerLeft,
-      child: Padding(
-        padding: const EdgeInsets.only(top: 8.0, bottom: 6.0),
-        child: Text(text, style: Theme.of(ctx).textTheme.titleSmall),
-      ));
 }

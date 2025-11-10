@@ -31,6 +31,34 @@ class SettingsModel {
   String gitlabAuthorEmail; // optional: nur Commits dieser Mail
   int gitlabLookbackDays; // Lookback in Tagen, um „letztes Ticket“ vor dem Zeitraum zu finden
 
+  // non meeting hints
+  String nonMeetingHintsMultiline;
+
+  // ---- Feste, unveränderliche Defaults (öffentlich) ----
+  static const List<String> defaultNonMeetingHintsList = <String>[
+    'homeoffice',
+    'an anderem ort tätig',
+    'im büro',
+    'im office',
+    'office',
+    'büro',
+    'arbeitsort',
+    'arbeitsplatz',
+    'standort',
+    'working elsewhere',
+    'focus',
+    'focus time',
+    'fokuszeit',
+    'reise',
+    'anreise',
+    'commute',
+    'fahrt',
+    'fahrtzeit',
+    'travel',
+    'anwesenheit',
+    'präsenz',
+  ];
+
   SettingsModel({
     this.meetingIssueKey = '',
     this.fallbackIssueKey = '',
@@ -57,7 +85,20 @@ class SettingsModel {
     this.gitlabProjectIds = '',
     this.gitlabAuthorEmail = '',
     this.gitlabLookbackDays = 30,
-  });
+    String? nonMeetingHintsMultiline,
+  }) : nonMeetingHintsMultiline = nonMeetingHintsMultiline ?? defaultNonMeetingHintsMultiline;
+
+  static String get defaultNonMeetingHintsMultiline => defaultNonMeetingHintsList.join('\n');
+
+  List<String> get nonMeetingHintsList => nonMeetingHintsMultiline
+      .split(RegExp(r'\r?\n'))
+      .map((e) => e.trim().toLowerCase())
+      .where((e) => e.isNotEmpty)
+      .toList();
+
+  void restoreDefaultNonMeetingHints() {
+    nonMeetingHintsMultiline = defaultNonMeetingHintsMultiline;
+  }
 
   Map<String, dynamic> toJson() => {
         'meetingIssueKey': meetingIssueKey,
@@ -84,6 +125,7 @@ class SettingsModel {
         'gitlabProjectIds': gitlabProjectIds,
         'gitlabAuthorEmail': gitlabAuthorEmail,
         'gitlabLookbackDays': gitlabLookbackDays,
+        'nonMeetingHintsMultiline': nonMeetingHintsMultiline,
       };
 
   factory SettingsModel.fromJson(Map<String, dynamic> m) => SettingsModel(
@@ -113,6 +155,7 @@ class SettingsModel {
         gitlabLookbackDays: (m['gitlabLookbackDays'] ?? 30) is int
             ? m['gitlabLookbackDays'] as int
             : int.tryParse((m['gitlabLookbackDays'] ?? '30').toString()) ?? 30,
+        nonMeetingHintsMultiline: (m['nonMeetingHintsMultiline'] ?? defaultNonMeetingHintsMultiline) as String,
       );
 }
 
