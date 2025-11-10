@@ -79,7 +79,12 @@ class AppState extends ChangeNotifier {
       settings.csvColEnd.trim().isNotEmpty &&
       settings.csvColDescription.trim().isNotEmpty &&
       settings.csvColPauseTotal.trim().isNotEmpty &&
-      settings.csvColPauseRanges.trim().isNotEmpty;
+      settings.csvColPauseRanges.trim().isNotEmpty &&
+      settings.csvColAbsenceTotal.trim().isNotEmpty &&
+      settings.csvColSick.trim().isNotEmpty &&
+      settings.csvColHoliday.trim().isNotEmpty &&
+      settings.csvColVacation.trim().isNotEmpty &&
+      settings.csvColTimeCompensation.trim().isNotEmpty;
 
   bool get isGitlabConfigured =>
       settings.gitlabBaseUrl.trim().isNotEmpty &&
@@ -181,7 +186,32 @@ class AppState extends ChangeNotifier {
     for (final d in dates) {
       final tt = _timetacProductiveOn(d);
       final mt = _meetingsIntersectedWithTimetac(d);
-      out.add(DayTotals(date: d, timetacTotal: tt, meetingsTotal: mt, leftover: tt - mt));
+
+      // Tagessummen aus CSV
+      final rows = timetac.where((r) => r.date.year == d.year && r.date.month == d.month && r.date.day == d.day);
+
+      final ktDays = rows.fold<double>(0.0, (p, r) => p + r.sickDays);
+      final ftDays = rows.fold<double>(0.0, (p, r) => p + r.holidayDays);
+      final utHours = rows.fold<Duration>(Duration.zero, (p, r) => p + r.vacationHours);
+      final zaHours = rows.fold<Duration>(Duration.zero, (p, r) => p + r.timeCompensationHours);
+
+      // Arzttermin, nur wenn KT/FT/UT == 0
+      final bnaSum = rows.fold<Duration>(Duration.zero, (p, r) => p + r.absenceTotal);
+      final doctor = (ktDays == 0.0 && ftDays == 0.0 && utHours == Duration.zero && zaHours == Duration.zero)
+          ? bnaSum
+          : Duration.zero;
+
+      out.add(DayTotals(
+        date: d,
+        timetacTotal: tt,
+        meetingsTotal: mt,
+        leftover: tt - mt - doctor,
+        sickDays: ktDays,
+        holidayDays: ftDays,
+        vacationHours: utHours,
+        doctorHours: doctor,
+        timeCompensationHours: zaHours,
+      ));
     }
     return out;
   }
@@ -274,6 +304,33 @@ class _HomePageState extends State<HomePage> {
       }
     }
     return idx >= 0 ? ordered[idx].ticket : null;
+  }
+
+  // Hilfsfunktion: kürzt eine Liste Arbeits-Intervalle (chronologisch) um N Minuten von hinten
+  List<WorkWindow> _trimPiecesFromEndBy(Duration cut, List<WorkWindow> pieces) {
+    if (cut <= Duration.zero || pieces.isEmpty) return pieces;
+    final res = <WorkWindow>[];
+    int totalCut = cut.inSeconds;
+
+    // von hinten nach vorn
+    for (int i = pieces.length - 1; i >= 0; i--) {
+      final w = pieces[i];
+      final len = w.duration.inSeconds;
+      if (totalCut <= 0) {
+        res.add(w);
+        continue;
+      }
+      if (totalCut >= len) {
+        totalCut -= len; // komplettes Fenster fällt weg
+        continue;
+      } else {
+        // kürze das letzte Fenster am Ende
+        res.add(WorkWindow(w.start, w.end.subtract(Duration(seconds: totalCut))));
+        totalCut = 0;
+      }
+    }
+    res.sort((a, b) => a.start.compareTo(b.start));
+    return res;
   }
 
   List<DraftLog> _assignRestPiecesByCommits({
@@ -748,19 +805,6 @@ class _HomePageState extends State<HomePage> {
   Future<void> _openSettings(BuildContext context) async {
     final s = context.read<AppState>().settings;
 
-    // --- Timezone Dropdown + Custom ---
-    final tzOptions = <String>[
-      'Europe/Vienna',
-      'Europe/Berlin',
-      'Europe/Zurich',
-      'Europe/Paris',
-      'Europe/London',
-      'UTC',
-      'Custom…',
-    ];
-    String tzValue = tzOptions.contains(s.timezone) ? s.timezone : 'Custom…';
-    final tzCustomCtl = TextEditingController(text: tzValue == 'Custom…' ? s.timezone : '');
-
     final baseCtl = TextEditingController(text: s.jiraBaseUrl);
     final mailCtl = TextEditingController(text: s.jiraEmail);
     final jiraTokCtl = TextEditingController(text: s.jiraApiToken);
@@ -774,6 +818,11 @@ class _HomePageState extends State<HomePage> {
     final durCtl = TextEditingController(text: s.csvColDuration);
     final pauseTotalCtl = TextEditingController(text: s.csvColPauseTotal);
     final pauseRangesCtl = TextEditingController(text: s.csvColPauseRanges);
+    final bnaCtl = TextEditingController(text: s.csvColAbsenceTotal);
+    final ktCtl = TextEditingController(text: s.csvColSick);
+    final ftCtl = TextEditingController(text: s.csvColHoliday);
+    final utCtl = TextEditingController(text: s.csvColVacation);
+    final zaCtl = TextEditingController(text: s.csvColTimeCompensation);
 
     final glBaseCtl = TextEditingController(text: s.gitlabBaseUrl);
     final glTokCtl = TextEditingController(text: s.gitlabToken);
@@ -789,29 +838,6 @@ class _HomePageState extends State<HomePage> {
             width: 700,
             child: SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
-                // Timezone Dropdown
-                Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('Allgemein', style: Theme.of(context).textTheme.titleSmall)),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  initialValue: tzValue,
-                  isExpanded: true,
-                  items: tzOptions.map((z) => DropdownMenuItem(value: z, child: Text(z))).toList(),
-                  onChanged: (v) {
-                    setDlg(() {
-                      tzValue = v ?? 'Europe/Vienna';
-                    });
-                  },
-                  decoration: const InputDecoration(labelText: 'Zeitzone'),
-                ),
-                if (tzValue == 'Custom…')
-                  TextFormField(
-                    controller: tzCustomCtl,
-                    decoration: const InputDecoration(labelText: 'Eigene Zeitzone (IANA, z. B. Europe/Vienna)'),
-                  ),
-                const SizedBox(height: 16),
-
                 // Jira
                 Align(
                     alignment: Alignment.centerLeft,
@@ -888,6 +914,35 @@ class _HomePageState extends State<HomePage> {
                           decoration: const InputDecoration(labelText: 'Spalte: Pausen-Ranges (Standard: Pausen)'),
                           controller: pauseRangesCtl)),
                 ]),
+                Row(children: [
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Krankheitstage (Standard: KT)'),
+                          controller: ktCtl)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Feiertage (Standard: FT)'),
+                          controller: ftCtl)),
+                ]),
+                Row(children: [
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Urlaubsstunden (Standard: UT)'),
+                          controller: utCtl)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: TextFormField(
+                          decoration:
+                              const InputDecoration(labelText: 'Spalte: Gesamte Nichtarbeitszeit (Standard: BNA)'),
+                          controller: bnaCtl)),
+                ]),
+                Row(children: [
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Zeitausgleich (Standard: ZA)'),
+                          controller: zaCtl)),
+                ]),
 
                 const SizedBox(height: 16),
 
@@ -918,11 +973,6 @@ class _HomePageState extends State<HomePage> {
               onPressed: () async {
                 final st = context.read<AppState>().settings;
 
-                // Zeitzone
-                st.timezone = (tzValue == 'Custom…')
-                    ? (tzCustomCtl.text.trim().isEmpty ? 'Europe/Vienna' : tzCustomCtl.text.trim())
-                    : tzValue;
-
                 // Jira
                 st.jiraBaseUrl = baseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
                 st.jiraEmail = mailCtl.text.trim();
@@ -938,6 +988,11 @@ class _HomePageState extends State<HomePage> {
                 st.csvColDuration = durCtl.text.trim();
                 st.csvColPauseTotal = pauseTotalCtl.text.trim();
                 st.csvColPauseRanges = pauseRangesCtl.text.trim();
+                s.csvColAbsenceTotal = bnaCtl.text.trim();
+                s.csvColSick = ktCtl.text.trim();
+                s.csvColHoliday = ftCtl.text.trim();
+                s.csvColVacation = utCtl.text.trim();
+                s.csvColTimeCompensation = zaCtl.text.trim();
 
                 // GitLab
                 st.gitlabBaseUrl = glBaseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
@@ -1093,15 +1148,27 @@ class _HomePageState extends State<HomePage> {
           }
         }
 
+        // Arzttermine nur berücksichtigen, wenn KT/FT/UT = 0
+        final ktDays = rowsForDay.fold<double>(0.0, (p, r) => p + r.sickDays);
+        final ftDays = rowsForDay.fold<double>(0.0, (p, r) => p + r.holidayDays);
+        final utDays = rowsForDay.fold<Duration>(Duration.zero, (p, r) => p + r.vacationHours);
+        final doctor = (ktDays == 0.0 && ftDays == 0.0 && utDays == Duration.zero)
+            ? rowsForDay.fold<Duration>(Duration.zero, (p, r) => p + r.absenceTotal)
+            : Duration.zero;
+
+        // Rest = Arbeitsfenster minus Meetings
         final restPieces = <WorkWindow>[];
         for (final w in workWindows) {
           restPieces.addAll(subtractIntervals(w, meetingCutters));
         }
 
+        // Arzttermin vom Rest abziehen
+        final trimmedRest = _trimPiecesFromEndBy(doctor, restPieces);
+
         final restDrafts = ordered.isEmpty
             ? <DraftLog>[]
             : _assignRestPiecesByCommits(
-                pieces: restPieces,
+                pieces: trimmedRest,
                 ordered: ordered,
                 note: 'Arbeit',
                 log: (s) => _log += s,

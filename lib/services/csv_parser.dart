@@ -5,19 +5,22 @@ class TimetacCsvParser {
   static List<TimetacRow> parseWithConfig(List<int> bytes, SettingsModel s) {
     final text = utf8.decode(bytes, allowMalformed: true);
     final lines = const LineSplitter().convert(text);
+    if (lines.isEmpty) return [];
 
     final delimiter = s.csvDelimiter.isNotEmpty ? s.csvDelimiter : ';';
 
     List<String>? header;
     var startRow = 0;
 
-    // Indizes (Name ODER Zahl erlaubt)
+    // Defaults nach deiner bisherigen Index-Logik
     int idxDesc = 28, idxDate = 4, idxStart = 7, idxEnd = 8, idxDur = 18;
     int idxPauseTotal = 9, idxPauseRanges = 10;
+    int idxAbsenceTotal = 18, idxSick = 25, idxHoliday = 24, idxVacationHours = 23, idxTimeCompensationHours = 21;
 
     if (s.csvHasHeader && lines.isNotEmpty) {
       header = _splitCsvLine(lines.first, delimiter);
       startRow = 1;
+
       idxDesc = _resolveIndex(s.csvColDescription, header, fallback: idxDesc);
       idxDate = _resolveIndex(s.csvColDate, header, fallback: idxDate);
       idxStart = _resolveIndex(s.csvColStart, header, fallback: idxStart);
@@ -25,8 +28,13 @@ class TimetacCsvParser {
       idxDur = _resolveIndex(s.csvColDuration, header, fallback: idxDur);
       idxPauseTotal = _resolveIndex(s.csvColPauseTotal, header, fallback: idxPauseTotal);
       idxPauseRanges = _resolveIndex(s.csvColPauseRanges, header, fallback: idxPauseRanges);
+      idxAbsenceTotal = _resolveIndex(s.csvColAbsenceTotal, header, fallback: idxAbsenceTotal);
+      idxSick = _resolveIndex(s.csvColSick, header, fallback: idxSick);
+      idxHoliday = _resolveIndex(s.csvColHoliday, header, fallback: idxHoliday);
+      idxVacationHours = _resolveIndex(s.csvColVacation, header, fallback: idxVacationHours);
+      idxTimeCompensationHours = _resolveIndex(s.csvColTimeCompensation, header, fallback: idxTimeCompensationHours);
 
-      // Fallback RA/SA → K/G (nur wenn per Name nicht gefunden)
+      // Fallback RA/SA → K/G
       if (!_validIndex(idxStart, header.length)) {
         final kIdx = header.indexWhere((h) => _norm(h) == 'k');
         if (kIdx >= 0) idxStart = kIdx;
@@ -36,7 +44,7 @@ class TimetacCsvParser {
         if (gIdx >= 0) idxEnd = gIdx;
       }
     } else {
-      // Kein Header: Spalten per Index (wenn in Settings Zahlen stehen)
+      // Kein Header: Spalten per Index (wenn Zahlen in Settings stehen)
       idxDesc = _resolveIndex(s.csvColDescription, null, fallback: idxDesc);
       idxDate = _resolveIndex(s.csvColDate, null, fallback: idxDate);
       idxStart = _resolveIndex(s.csvColStart, null, fallback: idxStart);
@@ -44,6 +52,23 @@ class TimetacCsvParser {
       idxDur = _resolveIndex(s.csvColDuration, null, fallback: idxDur);
       idxPauseTotal = _resolveIndex(s.csvColPauseTotal, null, fallback: idxPauseTotal);
       idxPauseRanges = _resolveIndex(s.csvColPauseRanges, null, fallback: idxPauseRanges);
+      idxAbsenceTotal = _resolveIndex(s.csvColAbsenceTotal, null, fallback: idxAbsenceTotal);
+      idxSick = _resolveIndex(s.csvColSick, null, fallback: idxSick);
+      idxHoliday = _resolveIndex(s.csvColHoliday, null, fallback: idxHoliday);
+      idxVacationHours = _resolveIndex(s.csvColVacation, null, fallback: idxVacationHours);
+      idxTimeCompensationHours = _resolveIndex(s.csvColTimeCompensation, null, fallback: idxTimeCompensationHours);
+    }
+
+    // Parser-Helfer
+    double parseDays(String v) {
+      final t = v.trim().replaceAll(',', '.');
+      return double.tryParse(t) ?? 0.0;
+    }
+
+    Duration parseHoursDecimal(String v) {
+      final t = v.trim().replaceAll(',', '.');
+      final x = double.tryParse(t) ?? 0.0;
+      return Duration(minutes: (x * 60).round());
     }
 
     final rows = <TimetacRow>[];
@@ -53,9 +78,22 @@ class TimetacCsvParser {
       if (raw.isEmpty) continue;
 
       final parts = _splitCsvLine(raw, delimiter);
-      final needLen = [idxDesc, idxDate, idxStart, idxEnd, idxDur, idxPauseTotal, idxPauseRanges]
-          .where((i) => i >= 0)
-          .fold<int>(0, (p, i) => i > p ? i : p);
+
+      final needLen = <int>[
+        idxDesc,
+        idxDate,
+        idxStart,
+        idxEnd,
+        idxDur,
+        idxPauseTotal,
+        idxPauseRanges,
+        idxAbsenceTotal,
+        idxSick,
+        idxHoliday,
+        idxVacationHours,
+        idxTimeCompensationHours
+      ].where((i) => i >= 0).fold<int>(0, (p, i) => i > p ? i : p);
+
       while (parts.length <= needLen) {
         parts.add('');
       }
@@ -74,10 +112,8 @@ class TimetacCsvParser {
       DateTime? start = _tryParseDateTime(startStr) ?? _combineDateAndTime(date, startStr);
       DateTime? end = _tryParseDateTime(endStr) ?? _combineDateAndTime(date, endStr);
 
-      // wenn kein Datum im Feld, aber Start existiert -> vom Start ableiten
       date ??= (start != null) ? DateTime(start.year, start.month, start.day) : null;
 
-      // Dauer
       var duration = Duration.zero;
       final parsedDur = _parseDurationFlexible(durStr);
       if (parsedDur != null) duration = parsedDur;
@@ -85,8 +121,8 @@ class TimetacCsvParser {
         duration = end.difference(start);
       }
 
-      // Pausen
       final pauseTotal = _parseDurationFlexible(pTotalStr) ?? Duration.zero;
+
       final pauses = <TimeRange>[];
       if (pRangesStr.isNotEmpty && date != null) {
         for (final chunk in _splitPauseRanges(pRangesStr)) {
@@ -106,6 +142,13 @@ class TimetacCsvParser {
 
       if (date == null) continue;
 
+      final absence = (idxAbsenceTotal >= 0) ? parseHoursDecimal(_get(parts, idxAbsenceTotal)) : Duration.zero;
+      final sick = (idxSick >= 0) ? parseDays(_get(parts, idxSick)) : 0.0;
+      final holiday = (idxHoliday >= 0) ? parseDays(_get(parts, idxHoliday)) : 0.0;
+      final vacation = (idxVacationHours >= 0) ? parseHoursDecimal(_get(parts, idxVacationHours)) : Duration.zero;
+      final timeCpomensation =
+          (idxTimeCompensationHours >= 0) ? parseHoursDecimal(_get(parts, idxTimeCompensationHours)) : Duration.zero;
+
       rows.add(TimetacRow(
         description: desc,
         date: DateTime(date.year, date.month, date.day),
@@ -114,6 +157,11 @@ class TimetacCsvParser {
         duration: duration,
         pauseTotal: pauseTotal,
         pauses: pauses,
+        absenceTotal: absence,
+        sickDays: sick,
+        holidayDays: holiday,
+        vacationHours: vacation,
+        timeCompensationHours: timeCpomensation,
       ));
     }
 

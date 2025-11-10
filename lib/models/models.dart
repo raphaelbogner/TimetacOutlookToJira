@@ -8,8 +8,6 @@ class SettingsModel {
   String jiraEmail;
   String jiraApiToken;
 
-  String timezone;
-
   // CSV-Konfiguration
   String csvDelimiter; // z. B. ";" oder ","
   bool csvHasHeader; // erste Zeile enthält Spaltennamen?
@@ -20,6 +18,11 @@ class SettingsModel {
   String csvColDuration; // Spalte für Dauer (z. B. 7.50 oder 07:30) (optional)
   String csvColPauseTotal; // Spalte für Gesamtpausendauer an dem Tag
   String csvColPauseRanges; // Spalte für die einzelnen Pausen im Format ("10:00-10:15; 10:30-10:45")
+  String csvColAbsenceTotal; // Spalte für Nichtarbeitszeit in Stunden
+  String csvColSick; // Spalte für Krankenstand
+  String csvColHoliday; // Spalte für Feiertag in Tagen (0.5 oder 1.0)
+  String csvColVacation; // Spalte für Urlaubstag in Stunden
+  String csvColTimeCompensation; // Spalte für Zeitausgleich in Stunden
 
   // GitLab
   String gitlabBaseUrl; // https://gitlab.example.com
@@ -34,7 +37,6 @@ class SettingsModel {
     this.jiraBaseUrl = '',
     this.jiraEmail = '',
     this.jiraApiToken = '',
-    this.timezone = 'Europe/Vienna',
     // Defaults für Timetac-Export
     this.csvDelimiter = ';',
     this.csvHasHeader = true,
@@ -45,6 +47,11 @@ class SettingsModel {
     this.csvColDuration = 'GIBA',
     this.csvColPauseTotal = 'P',
     this.csvColPauseRanges = 'Pausen',
+    this.csvColAbsenceTotal = 'BNA',
+    this.csvColSick = 'KT',
+    this.csvColHoliday = 'FT',
+    this.csvColVacation = 'UT',
+    this.csvColTimeCompensation = 'ZA',
     this.gitlabBaseUrl = '',
     this.gitlabToken = '',
     this.gitlabProjectIds = '',
@@ -58,7 +65,6 @@ class SettingsModel {
         'jiraBaseUrl': jiraBaseUrl,
         'jiraEmail': jiraEmail,
         'jiraApiToken': jiraApiToken,
-        'timezone': timezone,
         'csvDelimiter': csvDelimiter,
         'csvHasHeader': csvHasHeader,
         'csvColDescription': csvColDescription,
@@ -68,6 +74,11 @@ class SettingsModel {
         'csvColDuration': csvColDuration,
         'csvColPauseTotal': csvColPauseTotal,
         'csvColPauseRanges': csvColPauseRanges,
+        'csvColAbsenceTotal': csvColAbsenceTotal,
+        'csvColSick': csvColSick,
+        'csvColHoliday': csvColHoliday,
+        'csvColVacation': csvColVacation,
+        'csvColTimeCompensation': csvColTimeCompensation,
         'gitlabBaseUrl': gitlabBaseUrl,
         'gitlabToken': gitlabToken,
         'gitlabProjectIds': gitlabProjectIds,
@@ -81,7 +92,6 @@ class SettingsModel {
         jiraBaseUrl: (m['jiraBaseUrl'] ?? '').toString(),
         jiraEmail: (m['jiraEmail'] ?? '').toString(),
         jiraApiToken: (m['jiraApiToken'] ?? '').toString(),
-        timezone: (m['timezone'] ?? 'Europe/Vienna').toString(),
         csvDelimiter: (m['csvDelimiter'] ?? ';').toString(),
         csvHasHeader: (m['csvHasHeader'] ?? false) as bool,
         csvColDescription: (m['csvColDescription'] ?? '').toString(),
@@ -91,6 +101,11 @@ class SettingsModel {
         csvColDuration: (m['csvColDuration'] ?? '').toString(),
         csvColPauseTotal: (m['csvColPauseTotal'] ?? '').toString(),
         csvColPauseRanges: (m['csvColPauseRanges'] ?? '').toString(),
+        csvColAbsenceTotal: (m['csvColAbsenceTotal'] ?? '').toString(),
+        csvColSick: (m['csvColSick'] ?? '').toString(),
+        csvColHoliday: (m['csvColHoliday'] ?? '').toString(),
+        csvColVacation: (m['csvColVacation'] ?? '').toString(),
+        csvColTimeCompensation: (m['csvColTimeCompensation'] ?? '').toString(),
         gitlabBaseUrl: (m['gitlabBaseUrl'] ?? '').toString(),
         gitlabToken: (m['gitlabToken'] ?? '').toString(),
         gitlabProjectIds: (m['gitlabProjectIds'] ?? '').toString(),
@@ -117,6 +132,11 @@ class TimetacRow {
   final Duration duration; // preferred from start/end
   final Duration pauseTotal;
   final List<TimeRange> pauses;
+  final Duration absenceTotal; // Arzttermine in Stunden (nur wenn KT/FT/UT = 0), ansonsten alles gesamt
+  final double sickDays;
+  final double holidayDays;
+  final Duration vacationHours;
+  final Duration timeCompensationHours;
 
   TimetacRow({
     required this.description,
@@ -125,6 +145,11 @@ class TimetacRow {
     required this.end,
     required this.duration,
     this.pauseTotal = Duration.zero,
+    this.absenceTotal = Duration.zero,
+    this.sickDays = 0.0,
+    this.holidayDays = 0.0,
+    this.vacationHours = Duration.zero,
+    this.timeCompensationHours = Duration.zero,
     List<TimeRange>? pauses,
   }) : pauses = pauses ?? const [];
 }
@@ -134,11 +159,21 @@ class DayTotals {
   final Duration timetacTotal;
   final Duration meetingsTotal;
   final Duration leftover;
+  final double sickDays;
+  final double holidayDays;
+  final Duration vacationHours;
+  final Duration timeCompensationHours;
+  final Duration doctorHours;
 
   DayTotals({
     required this.date,
     required this.timetacTotal,
     required this.meetingsTotal,
     required this.leftover,
+    required this.sickDays,
+    required this.holidayDays,
+    required this.vacationHours,
+    required this.timeCompensationHours,
+    required this.doctorHours,
   });
 }
