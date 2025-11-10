@@ -45,6 +45,9 @@ class AppState extends ChangeNotifier {
   List<TimetacRow> timetac = [];
   List<IcsEvent> icsEvents = [];
 
+  bool get hasCsv => timetac.isNotEmpty;
+  bool get hasIcs => icsEvents.isNotEmpty;
+
   // GitLab Cache
   List<GitlabCommit> gitlabCommits = [];
 
@@ -482,6 +485,7 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final locked = !state.isAllConfigured;
+    final canCalculate = !locked && state.hasCsv && state.hasIcs;
 
     return Scaffold(
       appBar: AppBar(
@@ -520,7 +524,7 @@ class _HomePageState extends State<HomePage> {
                 _buildRangePicker(context),
                 Row(children: [
                   FilledButton.icon(
-                    onPressed: locked ? null : () => _calculate(context),
+                    onPressed: canCalculate ? () => _calculate(context) : null,
                     icon: const Icon(Icons.calculate),
                     label: const Text('Berechnen'),
                   ),
@@ -531,6 +535,9 @@ class _HomePageState extends State<HomePage> {
                     label: const Text('Buchen (Jira)'),
                   ),
                 ]),
+                if (!state.hasCsv || !state.hasIcs)
+                  const Text('CSV und ICS laden, um „Berechnen“ zu aktivieren.',
+                      style: TextStyle(fontSize: 12, color: Colors.grey)),
                 _switchedSection(context),
               ]),
             ),
@@ -727,28 +734,58 @@ class _HomePageState extends State<HomePage> {
           Row(children: [
             FilledButton.icon(
               onPressed: () async {
+                setState(() => _busy = true);
                 final res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['csv']);
                 if (res != null && res.files.single.path != null) {
-                  final bytes = await File(res.files.single.path!).readAsBytes();
-                  if (!context.mounted) return;
-                  final s = context.read<AppState>().settings;
-                  final parsed = TimetacCsvParser.parseWithConfig(bytes, s);
-                  setState(() {
-                    context.read<AppState>().timetac = parsed;
-                    _drafts = [];
-                    _log = 'CSV geladen: ${parsed.length} Zeilen\n';
-                    final days = parsed.map((r) => r.date).toSet().toList()..sort();
-                    if (days.isNotEmpty) {
-                      _log += 'CSV-Tage: ${days.first} … ${days.last} (${days.length} Tage)\n';
-                    }
-                  });
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(context)
-                      .showSnackBar(SnackBar(content: Text('CSV geladen: ${parsed.length} Zeilen')));
+                  setState(() => _busy = true);
+                  try {
+                    final bytes = await File(res.files.single.path!).readAsBytes();
+                    if (!context.mounted) return;
+                    final s = context.read<AppState>().settings;
+                    final parsed = TimetacCsvParser.parseWithConfig(bytes, s);
+                    setState(() {
+                      context.read<AppState>().timetac = parsed;
+                      _drafts = [];
+                      _log = 'CSV geladen: ${parsed.length} Zeilen\n';
+                      final days = parsed.map((r) => r.date).toSet().toList()..sort();
+                      if (days.isNotEmpty) {
+                        _log += 'CSV-Tage: ${days.first} … ${days.last} (${days.length} Tage)\n';
+                      }
+                    });
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text('CSV geladen: ${parsed.length} Zeilen')));
+                  } catch (e) {
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(const SnackBar(content: Text('CSV-Import fehlgeschlagen')));
+                    setState(() => _log += 'FEHLER CSV-Import: $e\n');
+                  } finally {
+                    if (mounted) setState(() => _busy = false);
+                  }
+                } else {
+                  setState(() => _busy = false);
                 }
               },
               icon: const Icon(Icons.table_chart),
               label: const Text('Timetac CSV laden'),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: 'Info zu CSV-Import',
+              icon: const Icon(Icons.info_outline),
+              onPressed: () {
+                _showInfoDialog(
+                  'Timetac CSV-Datei bekommen - Anleitung',
+                  'Schritt 1: Öffne Timetac.\n'
+                      'Schritt 2: Wechsle zum Tab "Stundenabrechnung".\n'
+                      'Schritt 3: Gebe in die Datumsfelder jeweils das Start- und Enddatum ein für den Zeitraum den du buchen willst (Am Besten gleich wie bei Outlook)\n'
+                      'Schritt 4: Drücke auf den Aktualisieren-Button.\n'
+                      'Schritt 5: Klicke rechts auf den Button "Exportieren als CSV-Datei".\n'
+                      'Schritt 6: Klicke im geöffneten Dialog auf "Herunterladen".\n'
+                      'Schritt 7: In dieser Anwendung die CSV-Datei importieren und kurz warten.\n',
+                );
+              },
             ),
             const SizedBox(width: 12),
             Text(ttSum == Duration.zero ? '—' : 'Summe Timetac: ${fmt(ttSum)}'),
@@ -757,26 +794,59 @@ class _HomePageState extends State<HomePage> {
           Row(children: [
             FilledButton.icon(
               onPressed: () async {
+                setState(() => _busy = true);
                 final res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['ics']);
                 if (res != null && res.files.single.path != null) {
-                  final content = await File(res.files.single.path!).readAsString();
-                  if (!context.mounted) return;
-                  final userMail = context.read<AppState>().settings.jiraEmail;
-                  final parsed = parseIcs(content, selfEmail: userMail);
-                  clearIcsDayCache();
-                  clearIcsRangeCache();
-                  setState(() {
-                    context.read<AppState>().icsEvents = parsed.events;
-                    _drafts = [];
-                    _log += 'ICS geladen: ${parsed.events.length} Events\n';
-                  });
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(context)
-                      .showSnackBar(SnackBar(content: Text('ICS geladen: ${parsed.events.length} Events')));
+                  try {
+                    final content = await File(res.files.single.path!).readAsString();
+                    if (!context.mounted) return;
+                    final userMail = context.read<AppState>().settings.jiraEmail;
+                    final parsed = parseIcs(content, selfEmail: userMail);
+                    clearIcsDayCache();
+                    clearIcsRangeCache();
+                    setState(() {
+                      context.read<AppState>().icsEvents = parsed.events;
+                      _drafts = [];
+                      _log += 'ICS geladen: ${parsed.events.length} Events\n';
+                    });
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text('ICS geladen: ${parsed.events.length} Events')));
+                  } catch (e) {
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(const SnackBar(content: Text('ICS-Import fehlgeschlagen')));
+                    setState(() => _log += 'FEHLER ICS-Import: $e\n');
+                  } finally {
+                    if (mounted) setState(() => _busy = false);
+                  }
+                } else {
+                  setState(() => _busy = false);
                 }
               },
               icon: const Icon(Icons.event),
               label: const Text('Outlook .ics laden'),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: 'Info zu ICS-Import',
+              icon: const Icon(Icons.info_outline),
+              onPressed: () {
+                _showInfoDialog(
+                  'Outlook ICS-Datei bekommen - Anleitung',
+                  'Schritt 1: Outlook (Classic) öffnen (WICHTIG! Es muss wirklich Outlook Classic sein.)\n'
+                      'Schritt 2: Links auf den Kalendar-Tab wechseln.\n'
+                      'Schritt 3: Oben auf den Reiter "Datei" klicken.\n'
+                      'Schritt 4: Links im Menü "Kalendar speichern" klicken.\n'
+                      'Schritt 5: Im Explorer-Fenster unten auf "Weitere Optionen" klicken\n'
+                      'Schritt 6: Bei Datumsbereich "Datum angeben..." auswählen und gewünschtes Beginn- und Enddatum für die Zeitbuchung wählen (Am Besten gleich wie bei Timetac).\n'
+                      'Schritt 7: Bei Detail "Alle Details" auswählen.\n'
+                      'Schritt 8: Bei Erweitert auf ">> Einblenden" klicken.\n'
+                      'Schritt 9: "Details von als privat markierten Elementen einschließen" aktivieren.\n'
+                      'Schritt 10: Auf "OK" klicken und die Datei irgendwo speichern, warten bis Outlook alles exportiert hat.\n'
+                      'Schritt 11: In dieser Anwendung die ICS-Datei importieren und etwas länger warten (Keine Sorge, das ist normal, dass sich das Programm kurz aufhängt).\n',
+                );
+              },
             ),
             const SizedBox(width: 12),
             Text(evSum == Duration.zero ? '—' : 'Meetings (gemergt) gesamt: ${fmt(evSum)}'),
@@ -843,6 +913,40 @@ class _HomePageState extends State<HomePage> {
           child: SelectableText(_log, style: const TextStyle(fontFamily: 'monospace')),
         ),
       );
+
+  Future<void> _showInfoDialog(String title, String body) async {
+    await showDialog(
+      context: context,
+      useRootNavigator: true,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SingleChildScrollView(child: Text(body)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx, rootNavigator: true).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showErrorDialog(String title, String body) async {
+    await showDialog(
+      context: context,
+      useRootNavigator: true,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SingleChildScrollView(child: Text(body)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx, rootNavigator: true).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
 
   String _hhmm(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
@@ -1017,11 +1121,10 @@ class _HomePageState extends State<HomePage> {
                                             const url = 'https://id.atlassian.com/manage-profile/security/api-tokens';
                                             final uri = Uri.parse(url);
                                             if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-                                              if (context.mounted) {
-                                                ScaffoldMessenger.of(context).showSnackBar(
-                                                  const SnackBar(content: Text('Link konnte nicht geöffnet werden')),
-                                                );
-                                              }
+                                              _showErrorDialog(
+                                                'Link konnte nicht geöffnet werden',
+                                                'Es wurde versucht "$url" zu öffnen',
+                                              );
                                             }
                                           },
                                         ),
@@ -1203,19 +1306,15 @@ class _HomePageState extends State<HomePage> {
                                               url = '$url/dashboard/projects';
                                               final uri = Uri.parse(url);
                                               if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-                                                if (context.mounted) {
-                                                  ScaffoldMessenger.of(context).showSnackBar(
-                                                    const SnackBar(content: Text('Link konnte nicht geöffnet werden')),
-                                                  );
-                                                }
+                                                _showErrorDialog(
+                                                  'Link konnte nicht geöffnet werden',
+                                                  'Es wurde versucht "$url" zu öffnen',
+                                                );
                                               }
                                             } else {
-                                              ScaffoldMessenger.of(context).showSnackBar(
-                                                const SnackBar(
-                                                  content: Text(
-                                                    'Link konnte nicht geöffnet werden, URL-Feld muss ausgefüllt sein',
-                                                  ),
-                                                ),
+                                              _showErrorDialog(
+                                                'Link konnte nicht geöffnet werden',
+                                                'URL-Feld muss ausgefüllt sein.',
                                               );
                                             }
                                           },
@@ -1241,19 +1340,15 @@ class _HomePageState extends State<HomePage> {
                                               url = '$url/-/user_settings/personal_access_tokens';
                                               final uri = Uri.parse(url);
                                               if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-                                                if (context.mounted) {
-                                                  ScaffoldMessenger.of(context).showSnackBar(
-                                                    const SnackBar(content: Text('Link konnte nicht geöffnet werden')),
-                                                  );
-                                                }
+                                                _showErrorDialog(
+                                                  'Link konnte nicht geöffnet werden',
+                                                  'Es wurde versucht "$url" zu öffnen',
+                                                );
                                               }
                                             } else {
-                                              ScaffoldMessenger.of(context).showSnackBar(
-                                                const SnackBar(
-                                                  content: Text(
-                                                    'Link konnte nicht geöffnet werden, URL-Feld muss ausgefüllt sein',
-                                                  ),
-                                                ),
+                                              _showErrorDialog(
+                                                'Link konnte nicht geöffnet werden',
+                                                'URL-Feld muss ausgefüllt sein.',
                                               );
                                             }
                                           },
