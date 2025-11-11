@@ -2,7 +2,7 @@ name: Build Desktop Releases
 
 on:
   push:
-    tags: ['v*']     # läuft automatisch bei z.B. v1.2.3
+    tags: ['[0-9]+.[0-9]+.[0-9]+*']
   workflow_dispatch:  # manueller Start
 
 jobs:
