@@ -1882,6 +1882,7 @@ class _HomePageState extends State<HomePage> {
       _log += 'EXCEPTION in Berechnung: $e\n$st\n';
     } finally {
       setState(() {
+        _tabIndex = 1;
         _busy = false;
       });
     }

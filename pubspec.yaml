@@ -1,7 +1,7 @@
 name: flutter_jira_timetac
 description: Desktop Flutter-App (Windows) zum Buchen von Timetac & Outlook (ICS) nach Jira Worklogs
 publish_to: "none"
-version: 4.0.0+1
+version: 4.0.1+1
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
