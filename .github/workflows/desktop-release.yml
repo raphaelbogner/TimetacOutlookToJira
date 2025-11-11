@@ -2,11 +2,11 @@ name: Desktop Release
 
 on:
   push:
-    tags: ['*']     # läuft bei jedem Tag
+    tags: ['*']
   workflow_dispatch:
 
 permissions:
-  contents: write   # nötig für Releases
+  contents: write
 
 jobs:
   build:
@@ -31,19 +31,29 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          # falls du eine fixe Version willst:
-          # flutter-version: '3.22.x'
 
       - name: Flutter deps
         run: flutter pub get
 
-      # Desktop aktivieren ist meist schon aktiv. Schadet nicht:
       - name: Enable desktop
         run: |
           flutter config --enable-windows-desktop
           flutter config --enable-macos-desktop
           flutter config --enable-linux-desktop
         shell: bash
+
+      # ------- Linux Build-Dependencies -------
+      - name: Install Linux desktop deps
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libgtk-3-dev \
+            liblzma-dev
 
       # ------- Build je OS -------
       - name: Build Windows
