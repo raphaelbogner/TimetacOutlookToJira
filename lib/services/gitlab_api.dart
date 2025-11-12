@@ -131,3 +131,31 @@ class GitlabApi {
     return out;
   }
 }
+
+extension GitlabAuth on GitlabApi {
+  String get _base => baseUrl.replaceAll(RegExp(r'/+$'), '');
+
+  Future<bool> checkAuth() async {
+    if (_base.isEmpty || token.trim().isEmpty) return false;
+
+    // 1) Primär: /user
+    try {
+      final u = Uri.parse('$_base/api/v4/user');
+      final r = await http.get(u, headers: _headers).timeout(const Duration(seconds: 10));
+      if (r.statusCode == 200) return true;
+      if (r.statusCode == 401 || r.statusCode == 403) return false;
+    } catch (_) {
+      // weiter zu Fallback
+    }
+
+    // 2) Fallback: minimaler Projekte-Call
+    try {
+      final u =
+          Uri.parse('$_base/api/v4/projects').replace(queryParameters: const {'per_page': '1', 'membership': 'true'});
+      final r = await http.get(u, headers: _headers).timeout(const Duration(seconds: 10));
+      return r.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+}

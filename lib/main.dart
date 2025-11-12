@@ -58,9 +58,13 @@ class AppState extends ChangeNotifier {
   SettingsModel settings = SettingsModel();
   List<TimetacRow> timetac = [];
   List<IcsEvent> icsEvents = [];
+  bool _jiraAuthOk = false;
+  bool _gitlabAuthOk = false;
 
   bool get hasCsv => timetac.isNotEmpty;
   bool get hasIcs => icsEvents.isNotEmpty;
+  bool get jiraAuthOk => _jiraAuthOk;
+  bool get gitlabAuthOk => _gitlabAuthOk;
 
   // GitLab Cache
   List<GitlabCommit> gitlabCommits = [];
@@ -88,6 +92,76 @@ class AppState extends ChangeNotifier {
     if (tm == 'dark') themeMode = ThemeMode.dark;
     if (tm == 'light') themeMode = ThemeMode.light;
     notifyListeners();
+
+    // Auto-Check beim Start
+    if (_jiraFieldsFilled) {
+      await validateJiraCredentials();
+    } else {
+      _jiraAuthOk = false;
+      notifyListeners();
+    }
+
+    if (_gitlabFieldsFilled) {
+      await validateGitlabCredentials();
+    } else {
+      _gitlabAuthOk = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> validateJiraCredentials() async {
+    if (!_jiraFieldsFilled) {
+      _jiraAuthOk = false;
+      notifyListeners();
+      return false;
+    }
+    try {
+      final api = JiraApi(
+        baseUrl: settings.jiraBaseUrl,
+        email: settings.jiraEmail,
+        apiToken: settings.jiraApiToken,
+      );
+      final ok = await api.checkAuth();
+      _jiraAuthOk = ok;
+      notifyListeners();
+      return ok;
+    } catch (_) {
+      _jiraAuthOk = false;
+      notifyListeners();
+      return false;
+    }
+  }
+
+  void markJiraUnknown() {
+    _jiraAuthOk = false;
+    notifyListeners();
+  }
+
+  Future<bool> validateGitlabCredentials() async {
+    if (!_gitlabFieldsFilled) {
+      _gitlabAuthOk = false;
+      notifyListeners();
+      return false;
+    }
+    try {
+      final api = GitlabApi(
+        baseUrl: settings.gitlabBaseUrl,
+        token: settings.gitlabToken,
+      );
+      final ok = await api.checkAuth();
+      _gitlabAuthOk = ok;
+      notifyListeners();
+      return ok;
+    } catch (_) {
+      _gitlabAuthOk = false;
+      notifyListeners();
+      return false;
+    }
+  }
+
+  void markGitlabUnknown() {
+    _gitlabAuthOk = false;
+    notifyListeners();
   }
 
   Future<void> savePrefs() async {
@@ -104,11 +178,14 @@ class AppState extends ChangeNotifier {
   }
 
   // ---------- Konfig-Validierung ----------
-  bool get isJiraConfigured =>
+  bool get _jiraFieldsFilled =>
       settings.jiraBaseUrl.trim().isNotEmpty &&
       settings.jiraEmail.trim().isNotEmpty &&
+      settings.jiraApiToken.trim().isNotEmpty &&
       settings.meetingIssueKey.trim().isNotEmpty &&
       settings.fallbackIssueKey.trim().isNotEmpty;
+
+  bool get isJiraConfigured => _jiraFieldsFilled && _jiraAuthOk;
 
   bool get isTimetacConfigured =>
       settings.csvDelimiter.trim().isNotEmpty &&
@@ -124,10 +201,12 @@ class AppState extends ChangeNotifier {
       settings.csvColVacation.trim().isNotEmpty &&
       settings.csvColTimeCompensation.trim().isNotEmpty;
 
-  bool get isGitlabConfigured =>
+  bool get _gitlabFieldsFilled =>
       settings.gitlabBaseUrl.trim().isNotEmpty &&
       settings.gitlabToken.trim().isNotEmpty &&
       settings.gitlabProjectIds.trim().isNotEmpty;
+
+  bool get isGitlabConfigured => _gitlabFieldsFilled && _gitlabAuthOk;
 
   bool get isAllConfigured => isJiraConfigured && isTimetacConfigured && isGitlabConfigured;
 
@@ -1024,6 +1103,9 @@ class _HomePageState extends State<HomePage> {
               bool timetacOk() => context.read<AppState>().isTimetacConfigured;
               bool gitlabOk() => context.read<AppState>().isGitlabConfigured;
 
+              bool jiraTesting = false;
+              bool gitlabTesting = false;
+
               Widget settingsIcon(bool ok) => Icon(
                     ok ? Icons.check_circle : Icons.cancel,
                     size: 18,
@@ -1202,6 +1284,56 @@ class _HomePageState extends State<HomePage> {
                                           },
                                         ),
                                       ),
+                                      sectionTitle(ctx, 'Verbindung'),
+                                      Row(
+                                        children: [
+                                          OutlinedButton.icon(
+                                            onPressed: () async {
+                                              // Eingaben nach settings übernehmen und speichern
+                                              final st = context.read<AppState>().settings;
+                                              st.jiraBaseUrl = baseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
+                                              st.jiraEmail = mailCtl.text.trim();
+                                              st.jiraApiToken = jiraTokCtl.text.trim();
+                                              st.meetingIssueKey = meetingCtl.text.trim();
+                                              st.fallbackIssueKey = fallbackCtl.text.trim();
+                                              await context.read<AppState>().savePrefs();
+
+                                              // Status zurücksetzen und testen
+                                              if (context.mounted) {
+                                                context.read<AppState>().markJiraUnknown();
+                                                setDlg(() => jiraTesting = true);
+                                                final ok = await context.read<AppState>().validateJiraCredentials();
+                                                setDlg(() => jiraTesting = false);
+
+                                                _showInfoDialog(
+                                                  'Jira-Verbindung',
+                                                  ok ? 'Jira-Verbindung erfolgreich' : 'Jira-Verbindung fehlgeschlagen',
+                                                );
+                                              }
+                                            },
+                                            icon: const Icon(Icons.link),
+                                            label: const Text('Verbindung testen'),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Builder(
+                                            builder: (ctx) {
+                                              final ok = context.watch<AppState>().jiraAuthOk;
+                                              return Row(children: [
+                                                Icon(ok ? Icons.check_circle : Icons.cancel,
+                                                    size: 18, color: ok ? Colors.green : Colors.red),
+                                                const SizedBox(width: 6),
+                                                Text(ok ? 'Verbunden' : 'Nicht verbunden'),
+                                              ]);
+                                            },
+                                          ),
+                                        ],
+                                      ),
+                                      if (jiraTesting)
+                                        const Padding(
+                                          padding: EdgeInsets.only(top: 8.0),
+                                          child: LinearProgressIndicator(),
+                                        ),
+                                      const SizedBox(width: 8),
                                     ],
                                   ),
                                 ),
@@ -1428,6 +1560,57 @@ class _HomePageState extends State<HomePage> {
                                           },
                                         ),
                                       ),
+                                      sectionTitle(ctx, 'Verbindung'),
+                                      Row(
+                                        children: [
+                                          OutlinedButton.icon(
+                                            onPressed: () async {
+                                              final st = context.read<AppState>().settings;
+                                              st.gitlabBaseUrl = glBaseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
+                                              st.gitlabToken = glTokCtl.text.trim();
+                                              st.gitlabProjectIds = glProjCtl.text.trim();
+                                              st.gitlabAuthorEmail = glMailCtl.text.trim();
+                                              await context.read<AppState>().savePrefs();
+
+                                              if (context.mounted) {
+                                                context.read<AppState>().markGitlabUnknown();
+                                                setDlg(() => gitlabTesting = true);
+                                                final ok = await context.read<AppState>().validateGitlabCredentials();
+                                                setDlg(() => gitlabTesting = false);
+
+                                                _showInfoDialog(
+                                                  'Gitlab-Verbindung',
+                                                  ok
+                                                      ? 'GitLab-Verbindung erfolgreich'
+                                                      : 'GitLab-Verbindung fehlgeschlagen',
+                                                );
+                                              }
+                                            },
+                                            icon: const Icon(Icons.link),
+                                            label: const Text('Verbindung testen'),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Builder(
+                                            builder: (_) {
+                                              final ok = context.watch<AppState>().gitlabAuthOk;
+                                              return Row(
+                                                children: [
+                                                  Icon(ok ? Icons.check_circle : Icons.cancel,
+                                                      size: 18, color: ok ? Colors.green : Colors.red),
+                                                  const SizedBox(width: 6),
+                                                  Text(ok ? 'Verbunden' : 'Nicht verbunden'),
+                                                ],
+                                              );
+                                            },
+                                          ),
+                                        ],
+                                      ),
+                                      if (gitlabTesting)
+                                        const Padding(
+                                          padding: EdgeInsets.only(top: 8),
+                                          child: LinearProgressIndicator(),
+                                        ),
+                                      const SizedBox(width: 8),
                                     ],
                                   ),
                                 ),
@@ -1569,7 +1752,8 @@ class _HomePageState extends State<HomePage> {
                             const Spacer(),
                             FilledButton(
                               onPressed: () async {
-                                final st = context.read<AppState>().settings;
+                                final app = context.read<AppState>();
+                                final st = app.settings;
 
                                 // Jira
                                 st.jiraBaseUrl = baseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
@@ -1600,28 +1784,32 @@ class _HomePageState extends State<HomePage> {
                                 st.gitlabProjectIds = glProjCtl.text.trim();
                                 st.gitlabAuthorEmail = glMailCtl.text.trim();
 
-                                // --- Non-Meeting-Hints speichern ---
-                                // 1) aktive Defaults
-                                final effectiveDefaults =
-                                    defaultsNonMeeting.where((d) => activeDefaults.contains(d)).toList();
+                                await app.savePrefs();
 
-                                // 2) valide Custom-Zeilen
-                                final customList = customHintCtrls
-                                    .map((c) => c.text.trim().toLowerCase())
-                                    .where((e) => e.isNotEmpty)
-                                    .toList();
+                                // Validieren
+                                app.markJiraUnknown();
+                                app.markGitlabUnknown();
+                                final jiraTestOkay = await app.validateJiraCredentials();
+                                final gitlabTestOkay = await app.validateGitlabCredentials();
+                                if (!ctx.mounted || !context.mounted) return;
 
-                                // 3) zusammenführen, Reihenfolge: Defaults dann Custom
-                                st.nonMeetingHintsMultiline = [
-                                  ...effectiveDefaults,
-                                  ...customList,
-                                ].join('\n');
+                                if (jiraTestOkay && gitlabTestOkay) {
+                                  Navigator.of(ctx).pop(); // Settings schließen
+                                  ScaffoldMessenger.of(context)
+                                      .showSnackBar(const SnackBar(content: Text('Gespeichert und verbunden')));
+                                  return;
+                                }
 
-                                await context.read<AppState>().savePrefs();
-                                if (context.mounted) Navigator.pop(ctx);
+                                // Fehlerfall: Settings-Dialog offen lassen und Fehlgrund anzeigen
+                                final msg = (!jiraTestOkay && !gitlabTestOkay)
+                                    ? 'Gespeichert, aber Jira und GitLab Verbindung fehlgeschlagen.'
+                                    : (!jiraTestOkay)
+                                        ? 'Gespeichert, aber Jira-Verbindung fehlgeschlagen.'
+                                        : 'Gespeichert, aber GitLab-Verbindung fehlgeschlagen.';
+                                await _showErrorDialog('Verbindung fehlgeschlagen', msg);
                               },
                               child: const Text('Speichern'),
-                            ),
+                            )
                           ],
                         ),
                       ],

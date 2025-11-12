@@ -114,3 +114,35 @@ class JiraApi {
     return result;
   }
 }
+
+extension JiraAuth on JiraApi {
+  Future<bool> checkAuth() async {
+    if (_base.isEmpty || email.isEmpty || apiToken.isEmpty) return false;
+
+    Future<int> ping(String path) async {
+      final uri = Uri.parse('$_base$path');
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+      try {
+        final req = await client.getUrl(uri);
+        req.headers
+          ..set(HttpHeaders.authorizationHeader, _auth)
+          ..set(HttpHeaders.acceptHeader, 'application/json');
+        final resp = await req.close().timeout(const Duration(seconds: 20));
+        // Body nicht nötig, nur Status
+        return resp.statusCode;
+      } catch (_) {
+        return -1;
+      } finally {
+        client.close(force: true);
+      }
+    }
+
+    final c3 = await ping('/rest/api/3/myself');
+    if (c3 == 200) return true;
+    if (c3 == 401 || c3 == 403) return false;
+
+    // Fallback für Jira Server/Data Center
+    final c2 = await ping('/rest/api/2/myself');
+    return c2 == 200;
+  }
+}
