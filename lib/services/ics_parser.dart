@@ -466,7 +466,7 @@ class _IcsDayCache {
       if (transpUpper == 'TRANSPARENT') return false;
 
       final busyUpper = (e.busyStatus ?? '').toUpperCase();
-      if (busyUpper == 'FREE' || busyUpper == 'WORKINGELSEWHERE' || busyUpper == 'OOF' || busyUpper == 'TENTATIVE') {
+      if (busyUpper == 'FREE' || busyUpper == 'WORKINGELSEWHERE' || busyUpper == 'OOF') {
         return false;
       }
 
@@ -617,14 +617,14 @@ class _UserRangeCache {
       if (transpUpper == 'TRANSPARENT') continue;
 
       final busyUpper = (e.busyStatus ?? '').toUpperCase();
-      if (busyUpper == 'FREE' || busyUpper == 'WORKINGELSEWHERE' || busyUpper == 'OOF' || busyUpper == 'TENTATIVE') {
+      if (busyUpper == 'FREE' || busyUpper == 'WORKINGELSEWHERE' || busyUpper == 'OOF') {
         continue;
       }
 
       if (e.attendeeCount == 0) continue;
 
       final ps = e.selfPartstat?.toUpperCase();
-      if (ps != null && ps != 'NEEDS-ACTION' && ps != 'ACCEPTED') continue;
+      if (ps != null && ps != 'NEEDS-ACTION' && ps != 'ACCEPTED' && ps != 'TENTATIVE') continue;
 
       final title = e.summary.trim().toLowerCase();
       if (title.isEmpty || _nonMeetingHints.any((k) => title.contains(k))) continue;
