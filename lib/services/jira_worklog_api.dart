@@ -1,39 +1,98 @@
 // lib/services/jira_worklog_api.dart
 import 'dart:convert';
-import 'package:http/http.dart' as http;
+import 'dart:io';
 
-class JiraResponse {
+class JiraWorklogResponse {
+  JiraWorklogResponse({required this.ok, this.body});
   final bool ok;
-  final int status;
   final String? body;
-  JiraResponse(this.ok, this.status, this.body);
 }
 
 class JiraWorklogApi {
+  JiraWorklogApi({
+    required this.baseUrl,
+    required this.email,
+    required this.apiToken,
+  });
+
   final String baseUrl;
   final String email;
   final String apiToken;
-  JiraWorklogApi({required this.baseUrl, required this.email, required this.apiToken});
 
-  Map<String, String> get _headers => {
-        'Authorization': 'Basic ${base64Encode(utf8.encode('$email:$apiToken'))}',
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-      };
+  String get _base => baseUrl.replaceAll(RegExp(r'/+$'), '');
+  String get _auth => 'Basic ${base64Encode(utf8.encode('$email:$apiToken'))}';
 
-  Future<JiraResponse> createWorklog({
+  // ---- Hilfsfunktionen ----
+
+  // ADF-Comment aus einfachem Text
+  Map<String, dynamic> _adfFromText(String text) {
+    final t = (text.trim().isEmpty) ? '' : text.trim();
+    return {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        {
+          "type": "paragraph",
+          "content": t.isEmpty
+              ? [] // leer lassen ist ok
+              : [
+                  {"type": "text", "text": t}
+                ]
+        }
+      ]
+    };
+  }
+
+  // Jira-Startzeit-Format: yyyy-MM-dd'T'HH:mm:ss.SSSZ (Offset ohne Doppelpunkt)
+  String _formatJiraStarted(DateTime dt) {
+    final local = dt.toLocal();
+    final y = local.year.toString().padLeft(4, '0');
+    final mo = local.month.toString().padLeft(2, '0');
+    final d = local.day.toString().padLeft(2, '0');
+    final h = local.hour.toString().padLeft(2, '0');
+    final mi = local.minute.toString().padLeft(2, '0');
+    final s = local.second.toString().padLeft(2, '0');
+    final ms = local.millisecond.toString().padLeft(3, '0');
+
+    final off = local.timeZoneOffset;
+    final sign = off.isNegative ? '-' : '+';
+    final offH = off.inHours.abs().toString().padLeft(2, '0');
+    final offM = (off.inMinutes.abs() % 60).toString().padLeft(2, '0');
+    final offset = '$sign$offH$offM'; // <- genau so erwartet Jira
+
+    return '$y-$mo-${d}T$h:$mi:$s.$ms$offset';
+  }
+
+  Future<JiraWorklogResponse> createWorklog({
     required String issueKeyOrId,
     required DateTime started,
     required int timeSpentSeconds,
-    String? comment,
+    String comment = '',
   }) async {
-    final payload = <String, dynamic>{
-      'started': started.toUtc().toIso8601String(),
-      'timeSpentSeconds': timeSpentSeconds,
-      if (comment != null) 'comment': comment,
+    final uri = Uri.parse('$_base/rest/api/3/issue/${Uri.encodeComponent(issueKeyOrId)}/worklog');
+
+    final body = <String, dynamic>{
+      "started": _formatJiraStarted(started),
+      "timeSpentSeconds": timeSpentSeconds,
+      "comment": _adfFromText(comment),
     };
-    final url = Uri.parse('$baseUrl/rest/api/3/issue/$issueKeyOrId/worklog');
-    final res = await http.post(url, headers: _headers, body: jsonEncode(payload));
-    return JiraResponse(res.statusCode >= 200 && res.statusCode < 300, res.statusCode, res.body);
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final req = await client.postUrl(uri);
+      req.headers.set(HttpHeaders.authorizationHeader, _auth);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
+      req.add(utf8.encode(jsonEncode(body)));
+
+      final resp = await req.close().timeout(const Duration(seconds: 30));
+      final txt = await utf8.decodeStream(resp);
+      final ok = resp.statusCode >= 200 && resp.statusCode < 300;
+      return JiraWorklogResponse(ok: ok, body: txt.isEmpty ? null : txt);
+    } catch (e) {
+      return JiraWorklogResponse(ok: false, body: '$e');
+    } finally {
+      client.close(force: true);
+    }
   }
 }

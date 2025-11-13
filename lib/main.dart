@@ -1,25 +1,30 @@
-// lib/main.dart
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'logic/worklog_builder.dart';
 import 'models/models.dart';
 import 'services/csv_parser.dart';
+import 'services/gitlab_api.dart';
 import 'services/ics_parser.dart';
 import 'services/jira_api.dart';
 import 'services/jira_worklog_api.dart';
-import 'services/gitlab_api.dart';
-import 'widgets/preview_table.dart';
-import 'logic/worklog_builder.dart';
 import 'ui/preview_utils.dart';
+import 'widgets/preview_table.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('de_DE', null);
+  Intl.defaultLocale = 'de_DE';
   runApp(const MyApp());
 }
 
@@ -46,6 +51,16 @@ class MyApp extends StatelessWidget {
             darkTheme: dark,
             themeMode: app.themeMode,
             debugShowCheckedModeBanner: false,
+            locale: const Locale('de', 'DE'),
+            supportedLocales: const [
+              Locale('de', 'DE'),
+              Locale('en', 'US'),
+            ],
+            localizationsDelegates: const [
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
             home: const HomePage(),
           );
         },
@@ -738,7 +753,7 @@ class _HomePageState extends State<HomePage> {
     final jira = JiraApi(baseUrl: settings.jiraBaseUrl, email: settings.jiraEmail, apiToken: settings.jiraApiToken);
     final byDay = <String, List<DraftLog>>{};
     for (final d in drafts) {
-      final key = DateFormat('yyyy-MM-dd').format(d.start);
+      final key = DateFormat('dd.MM.yyyy').format(d.start);
       (byDay[key] ??= []).add(d);
     }
     final dayKeys = byDay.keys.toList()..sort();
@@ -767,7 +782,6 @@ class _HomePageState extends State<HomePage> {
                   return Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Expanded(child: Text(line, style: const TextStyle(fontFamily: 'monospace'))),
                       IconButton(
                         tooltip: 'Ticket ändern',
                         icon: const Icon(Icons.swap_horiz),
@@ -792,6 +806,7 @@ class _HomePageState extends State<HomePage> {
                           }
                         },
                       ),
+                      Expanded(child: Text(line, style: const TextStyle(fontFamily: 'monospace'))),
                     ],
                   );
                 }),
@@ -968,6 +983,7 @@ class _HomePageState extends State<HomePage> {
                         lastDate: maxDate.add(const Duration(days: 365)),
                         initialDateRange: activeRange ?? DateTimeRange(start: minDate, end: maxDate),
                         helpText: 'Bitte Zeitraum wählen',
+                        locale: const Locale('de', 'DE'),
                       );
                       if (picked != null) {
                         setState(() {
@@ -1887,7 +1903,7 @@ class _HomePageState extends State<HomePage> {
         rangeEnd = DateTime(state.range!.end.year, state.range!.end.month, state.range!.end.day);
         csvDays = csvDays.where((d) => !d.isBefore(rangeStart) && !d.isAfter(rangeEnd)).toList();
         _log +=
-            'Zeitraum aktiv: ${DateFormat('yyyy-MM-dd').format(rangeStart)} – ${DateFormat('yyyy-MM-dd').format(rangeEnd)}\n';
+            'Zeitraum aktiv: ${DateFormat('dd.MM.yyyy').format(rangeStart)} – ${DateFormat('dd.MM.yyyy').format(rangeEnd)}\n';
       } else {
         rangeStart = csvDays.first;
         rangeEnd = csvDays.last;
@@ -2053,7 +2069,7 @@ class _HomePageState extends State<HomePage> {
         final dayTicketCount =
             ordered.where((c) => c.at.year == day.year && c.at.month == day.month && c.at.day == day.day).length;
 
-        _log += 'Tag ${DateFormat('yyyy-MM-dd').format(day)}: '
+        _log += 'Tag ${DateFormat('dd.MM.yyyy').format(day)}: '
             'Timetac=${formatDuration(productiveDur)}, '
             'Meetings=${formatDuration(meetingDur)}, '
             '${ignoreOutlook ? 'Outlook ignoriert' : 'Outlook berücksichtigt'}, '
@@ -2213,10 +2229,12 @@ class _HomePageState extends State<HomePage> {
 
     if (_drafts.isEmpty) {
       setState(() => _log += 'Keine Worklogs zu senden.\n');
+      await _showInfoDialog('Buchen', 'Keine Worklogs zu senden.');
       return;
     }
     if (!state.isJiraConfigured) {
       setState(() => _log += 'FEHLER: Jira-Zugangsdaten fehlen.\n');
+      await _showErrorDialog('Buchen fehlgeschlagen', 'Jira-Zugangsdaten fehlen.');
       return;
     }
 
@@ -2250,32 +2268,49 @@ class _HomePageState extends State<HomePage> {
       }
 
       int ok = 0, fail = 0;
+      final failures = <String>[];
+
       for (final d in _drafts) {
         final key = _issueOverrides[_draftKey(d)] ?? d.issueKey;
         final keyOrId = keyToId[key] ?? key;
         final res = await worklogApi.createWorklog(
           issueKeyOrId: keyOrId,
-          started: d.start,
+          started: d.start, // jetzt korrekt im API-Client formatiert
           timeSpentSeconds: d.duration.inSeconds,
           comment: d.note,
         );
         if (res.ok) {
           ok++;
-          _log += 'OK (Jira) ${d.issueKey} ${DateFormat('yyyy-MM-dd').format(d.start)} ${d.duration.inMinutes}m\n';
+          _log += 'OK (Jira) ${d.issueKey} ${DateFormat('dd.MM.yyyy').format(d.start)} ${d.duration.inMinutes}m\n';
         } else {
           fail++;
-          _log += 'FEHLER (Jira) ${d.issueKey} ${DateFormat('yyyy-MM-dd').format(d.start)}: ${res.body ?? ''}\n';
+          final line = 'FEHLER ${d.issueKey} ${DateFormat('dd.MM.yyyy HH:mm').format(d.start)}: ${res.body ?? ''}';
+          failures.add(line);
+          _log += '$line\n';
         }
       }
 
       _log += '\nFertig. Erfolgreich: $ok, Fehler: $fail\n';
       setState(() {});
+
+      if (fail == 0) {
+        await _showInfoDialog('Buchen erfolgreich', 'Alle $ok Worklogs wurden gebucht.');
+      } else {
+        final details = failures.take(25).join('\n');
+        await _showErrorDialog(
+          'Buchen teilweise/fehlgeschlagen',
+          'Erfolgreich: $ok\nFehler: $fail\n\n$details',
+        );
+      }
     } catch (e, st) {
       setState(() => _log += 'EXCEPTION beim Senden: $e\n$st\n');
+      await _showErrorDialog('Buchen fehlgeschlagen', '$e');
     } finally {
-      setState(() {
-        _busy = false;
-      });
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
     }
   }
 }
