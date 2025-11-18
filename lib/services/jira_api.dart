@@ -146,3 +146,31 @@ extension JiraAuth on JiraApi {
     return c2 == 200;
   }
 }
+
+extension JiraMe on JiraApi {
+  Future<String?> fetchMyAccountId() async {
+    if (_base.isEmpty) return null;
+
+    final uri = Uri.parse('$_base/rest/api/3/myself');
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+
+    try {
+      final req = await client.getUrl(uri);
+      req.headers
+        ..set(HttpHeaders.authorizationHeader, _auth)
+        ..set(HttpHeaders.acceptHeader, 'application/json');
+
+      final resp = await req.close().timeout(const Duration(seconds: 20));
+      if (resp.statusCode < 200 || resp.statusCode >= 300) return null;
+
+      final body = await utf8.decodeStream(resp);
+      final json = jsonDecode(body) as Map;
+      final id = (json['accountId'] ?? '').toString();
+      return id.isEmpty ? null : id;
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+}

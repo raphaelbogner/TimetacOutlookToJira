@@ -8,6 +8,24 @@ class JiraWorklogResponse {
   final String? body;
 }
 
+class JiraWorklog {
+  JiraWorklog({
+    required this.id,
+    required this.issueKey,
+    required this.authorAccountId,
+    required this.started,
+    required this.timeSpent,
+  });
+
+  final String id;
+  final String issueKey;
+  final String authorAccountId;
+  final DateTime started;
+  final Duration timeSpent;
+
+  DateTime get end => started.add(timeSpent);
+}
+
 class JiraWorklogApi {
   JiraWorklogApi({
     required this.baseUrl,
@@ -63,6 +81,19 @@ class JiraWorklogApi {
     return '$y-$mo-${d}T$h:$mi:$s.$ms$offset';
   }
 
+  DateTime _parseJiraStarted(String value) {
+    // Beispiel: 2025-11-13T08:00:00.000+0100 (Jira-Format) :contentReference[oaicite:0]{index=0}
+    if (value.length >= 5) {
+      final tail = value.substring(value.length - 5);
+      if (RegExp(r'[+-]\d{4}$').hasMatch(tail)) {
+        final withColon = '${value.substring(0, value.length - 5)}${tail.substring(0, 3)}:${tail.substring(3)}';
+        return DateTime.parse(withColon);
+      }
+    }
+    // Fallback: falls Jira irgendwann mal ein „normales“ ISO 8601 mit Doppelpunkt liefert
+    return DateTime.parse(value);
+  }
+
   Future<JiraWorklogResponse> createWorklog({
     required String issueKeyOrId,
     required DateTime started,
@@ -94,5 +125,80 @@ class JiraWorklogApi {
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<List<JiraWorklog>> fetchWorklogsForIssue({
+    required String issueKeyOrId,
+  }) async {
+    final result = <JiraWorklog>[];
+
+    int startAt = 0;
+    const maxResults = 1000;
+
+    while (true) {
+      final uri = Uri.parse(
+        '$_base/rest/api/3/issue/${Uri.encodeComponent(issueKeyOrId)}/worklog'
+        '?startAt=$startAt&maxResults=$maxResults',
+      );
+
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+
+      try {
+        final req = await client.getUrl(uri);
+        req.headers
+          ..set(HttpHeaders.authorizationHeader, _auth)
+          ..set(HttpHeaders.acceptHeader, 'application/json');
+
+        final resp = await req.close().timeout(const Duration(seconds: 30));
+        final body = await utf8.decodeStream(resp);
+
+        if (resp.statusCode < 200 || resp.statusCode >= 300) {
+          // Bei 404 kannst du optional auf /rest/api/2/... zurückfallen
+          break;
+        }
+
+        final json = jsonDecode(body) as Map;
+        final worklogs = (json['worklogs'] as List?) ?? const [];
+        final total = (json['total'] as num?)?.toInt() ?? worklogs.length;
+
+        for (final wl in worklogs) {
+          final m = wl as Map;
+
+          final id = (m['id'] ?? '').toString();
+          final startedRaw = (m['started'] ?? '').toString();
+          final timeSpentSeconds = (m['timeSpentSeconds'] as num?)?.toInt() ?? 0;
+
+          final author = (m['author'] as Map?) ?? const {};
+          final authorAccountId = (author['accountId'] ?? '').toString();
+
+          if (id.isEmpty || startedRaw.isEmpty || timeSpentSeconds <= 0) {
+            continue;
+          }
+
+          final started = _parseJiraStarted(startedRaw);
+
+          result.add(
+            JiraWorklog(
+              id: id,
+              issueKey: issueKeyOrId,
+              authorAccountId: authorAccountId,
+              started: started,
+              timeSpent: Duration(seconds: timeSpentSeconds),
+            ),
+          );
+        }
+
+        if (startAt + worklogs.length >= total) {
+          break; // fertig paginiert
+        }
+
+        startAt += worklogs.length;
+      } finally {
+        // neuer Client im Loop, also hier schließen
+        client.close(force: true);
+      }
+    }
+
+    return result;
   }
 }

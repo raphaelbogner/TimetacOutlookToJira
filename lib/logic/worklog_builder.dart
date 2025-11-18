@@ -1,28 +1,49 @@
 // lib/logic/worklog_builder.dart
 
 class WorkWindow {
-  WorkWindow(this.start, this.end);
   DateTime start;
   DateTime end;
   Duration get duration => end.difference(start);
+
+  WorkWindow(this.start, this.end);
 }
 
 class MeetingWindow extends WorkWindow {
+  String title;
+
   MeetingWindow(
     super.start,
     super.end,
     this.title,
   );
-  String title;
+}
+
+enum DeltaState {
+  newEntry,
+  duplicate,
+  overlap,
 }
 
 class DraftLog {
-  DraftLog({required this.start, required this.end, required this.issueKey, required this.note});
   DateTime start;
   DateTime end;
   String issueKey;
   String note;
+
+  DeltaState deltaState;
+
   Duration get duration => end.difference(start);
+  bool get isDuplicate => deltaState == DeltaState.duplicate;
+  bool get isOverlap => deltaState == DeltaState.overlap;
+  bool get isNew => deltaState == DeltaState.newEntry;
+
+  DraftLog({
+    required this.start,
+    required this.end,
+    required this.issueKey,
+    required this.note,
+    this.deltaState = DeltaState.newEntry,
+  });
 }
 
 /// Merged überlappende oder direkt aneinanderstoßende Intervalle (Union).

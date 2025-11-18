@@ -73,18 +73,23 @@ class AppState extends ChangeNotifier {
   SettingsModel settings = SettingsModel();
   List<TimetacRow> timetac = [];
   List<IcsEvent> icsEvents = [];
+  List<JiraWorklog> _existingWorklogs = [];
+
   bool _jiraAuthOk = false;
   bool _gitlabAuthOk = false;
+  bool deltaModeEnabled = true;
 
   bool get hasCsv => timetac.isNotEmpty;
   bool get hasIcs => icsEvents.isNotEmpty;
   bool get jiraAuthOk => _jiraAuthOk;
   bool get gitlabAuthOk => _gitlabAuthOk;
+  List<JiraWorklog> get existingWorklogs => _existingWorklogs;
 
   // GitLab Cache
   List<GitlabCommit> gitlabCommits = [];
 
   DateTimeRange? range;
+  String? jiraAccountId;
 
   // ---- Theme ----
   ThemeMode themeMode = ThemeMode.light;
@@ -133,18 +138,28 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+
     try {
       final api = JiraApi(
         baseUrl: settings.jiraBaseUrl,
         email: settings.jiraEmail,
         apiToken: settings.jiraApiToken,
       );
+
       final ok = await api.checkAuth();
       _jiraAuthOk = ok;
+
+      if (ok) {
+        jiraAccountId = await api.fetchMyAccountId();
+      } else {
+        jiraAccountId = null;
+      }
+
       notifyListeners();
       return ok;
     } catch (_) {
       _jiraAuthOk = false;
+      jiraAccountId = null;
       notifyListeners();
       return false;
     }
@@ -376,6 +391,106 @@ class AppState extends ChangeNotifier {
       ));
     }
     return out;
+  }
+
+  bool _intervalsOverlap(
+    DateTime aStart,
+    DateTime aEnd,
+    DateTime bStart,
+    DateTime bEnd,
+  ) {
+    final latestStart = aStart.isAfter(bStart) ? aStart : bStart;
+    final earliestEnd = aEnd.isBefore(bEnd) ? aEnd : bEnd;
+    return earliestEnd.isAfter(latestStart);
+  }
+
+  void _applyDeltaToDrafts(
+    List<DraftLog> drafts,
+    List<JiraWorklog> worklogs,
+  ) {
+    for (final d in drafts) {
+      var state = DeltaState.newEntry;
+
+      final sameIssueLogs = worklogs.where((w) => w.issueKey == d.issueKey).toList();
+
+      for (final w in sameIssueLogs) {
+        if (!_intervalsOverlap(d.start, d.end, w.started, w.end)) {
+          continue;
+        }
+
+        final durationDiff = (d.duration.inSeconds - w.timeSpent.inSeconds).abs();
+        final startDiffMinutes = d.start.difference(w.started).inMinutes.abs();
+
+        final isDurationClose = durationDiff <= 60; // ±1 min
+        final isStartClose = startDiffMinutes <= 5; // ±5 min
+
+        if (isDurationClose && isStartClose) {
+          state = DeltaState.duplicate;
+          break; // exakter Treffer reicht
+        } else {
+          // zumindest Überlappung
+          state = DeltaState.overlap;
+        }
+      }
+
+      d.deltaState = state;
+    }
+  }
+
+  Future<void> applyDeltaModeToDrafts(List<DraftLog> drafts) async {
+    // Wenn keine Drafts: alles zurücksetzen und gut
+    if (drafts.isEmpty) {
+      _existingWorklogs = [];
+      notifyListeners();
+      return;
+    }
+
+    // Wenn Delta-Mode aus oder Jira nicht sauber → alle als "neu" markieren
+    if (!deltaModeEnabled || !isJiraConfigured || jiraAccountId == null) {
+      _existingWorklogs = [];
+      _applyDeltaToDrafts(drafts, _existingWorklogs);
+      notifyListeners();
+      return;
+    }
+
+    // WIRKLICHER ZEITRAUM = Span deiner Drafts
+    final minStart = drafts.map((d) => d.start).reduce((a, b) => a.isBefore(b) ? a : b);
+    final maxEnd = drafts.map((d) => d.end).reduce((a, b) => a.isAfter(b) ? a : b);
+
+    final api = JiraWorklogApi(
+      baseUrl: settings.jiraBaseUrl,
+      email: settings.jiraEmail,
+      apiToken: settings.jiraApiToken,
+    );
+
+    final keys = drafts.map((d) => d.issueKey).toSet().toList();
+    final all = <JiraWorklog>[];
+
+    for (final key in keys) {
+      try {
+        final wls = await api.fetchWorklogsForIssue(issueKeyOrId: key);
+
+        // Nur Worklogs von dir, die in den Draft-Zeitraum fallen
+        final filtered = wls.where((w) {
+          if (w.authorAccountId != jiraAccountId) return false;
+
+          return _intervalsOverlap(
+            w.started,
+            w.end,
+            minStart,
+            maxEnd,
+          );
+        });
+
+        all.addAll(filtered);
+      } catch (_) {
+        // Fehler bei einem Issue ignorieren – Delta-Modus lieber "zu defensiv"
+      }
+    }
+
+    _existingWorklogs = all;
+    _applyDeltaToDrafts(drafts, all);
+    notifyListeners();
   }
 }
 
@@ -688,6 +803,85 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _deltaBadge(DraftLog d) {
+    IconData icon;
+    Color color;
+    String tooltip;
+
+    switch (d.deltaState) {
+      case DeltaState.newEntry:
+        icon = Icons.fiber_new;
+        color = Colors.green;
+        tooltip = 'Neu – noch nicht in Jira vorhanden';
+        break;
+      case DeltaState.duplicate:
+        icon = Icons.check_circle;
+        color = Colors.grey;
+        tooltip = 'Duplikat – sehr ähnlich zu bestehendem Jira-Worklog';
+        break;
+      case DeltaState.overlap:
+        icon = Icons.warning_amber_rounded;
+        color = Colors.orange;
+        tooltip = 'Überlappung – schneidet bestehenden Jira-Worklog';
+        break;
+    }
+
+    return Tooltip(
+      message: tooltip,
+      child: Icon(
+        icon,
+        size: 18,
+        color: color,
+      ),
+    );
+  }
+
+  Widget _deltaLegend() {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: 4,
+      children: [
+        Wrap(
+          spacing: 16,
+          runSpacing: 4,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.fiber_new, size: 16, color: Colors.green),
+                SizedBox(width: 4),
+                Text('Neu', style: TextStyle(fontSize: 12)),
+              ],
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.check_circle, size: 16, color: Colors.grey),
+                SizedBox(width: 4),
+                Text('Duplikat', style: TextStyle(fontSize: 12)),
+              ],
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.warning_amber_rounded, size: 16, color: Colors.orange),
+                SizedBox(width: 4),
+                Text('Überlappend', style: TextStyle(fontSize: 12)),
+              ],
+            ),
+          ],
+        ),
+        Text(
+          '(Überlappende/Duplizierte Buchungen werden beim Buchen übersprungen)',
+          style: TextStyle(
+            fontStyle: FontStyle.italic,
+            fontSize: 12,
+          ),
+        ),
+      ],
+    );
+  }
+
   // Overlay wenn gesperrt
   Widget _lockOverlay(BuildContext context, AppState state) {
     final missing = <String>[];
@@ -766,6 +960,8 @@ class _HomePageState extends State<HomePage> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('Geplante Worklogs', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
+          _deltaLegend(),
+          const SizedBox(height: 16),
           for (final day in dayKeys) ...[
             Text(day, style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 4),
@@ -779,9 +975,25 @@ class _HomePageState extends State<HomePage> {
                   final line = '$effectiveKey  ${_hhmm(w.start)}–${_hhmm(w.end)}  (${formatDuration(w.duration)})  '
                       '${w.note}${maybeTitle.isNotEmpty ? ' – $maybeTitle' : ''}';
 
+                  // Stil je nach Delta-Status
+                  TextStyle style = const TextStyle(fontFamily: 'monospace');
+                  switch (w.deltaState) {
+                    case DeltaState.newEntry:
+                      // Standard
+                      break;
+                    case DeltaState.duplicate:
+                      style = style.copyWith(color: Colors.grey);
+                      break;
+                    case DeltaState.overlap:
+                      style = style.copyWith(color: Colors.orange);
+                      break;
+                  }
+
                   return Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      _deltaBadge(w),
+                      const SizedBox(width: 8),
                       IconButton(
                         tooltip: 'Ticket ändern',
                         icon: const Icon(Icons.swap_horiz),
@@ -794,7 +1006,6 @@ class _HomePageState extends State<HomePage> {
                           if (picked != null && picked.isNotEmpty) {
                             setState(() {
                               _issueOverrides[draftId] = picked;
-                              // optional: Summary sofort nachladen
                               if (!_jiraSummaryCache.containsKey(picked)) {
                                 jira.fetchSummariesByKeys({picked}).then((m) {
                                   if (m.isNotEmpty && mounted) {
@@ -806,7 +1017,7 @@ class _HomePageState extends State<HomePage> {
                           }
                         },
                       ),
-                      Expanded(child: Text(line, style: const TextStyle(fontFamily: 'monospace'))),
+                      Expanded(child: Text(line, style: style)),
                     ],
                   );
                 }),
@@ -2089,6 +2300,8 @@ class _HomePageState extends State<HomePage> {
       }
       _jiraSummaryCache = summaries;
 
+      await state.applyDeltaModeToDrafts(allDrafts);
+
       // Drafts direkt übernehmen, note NICHT mit Titeln anreichern
       setState(() {
         _drafts = allDrafts;
@@ -2255,7 +2468,53 @@ class _HomePageState extends State<HomePage> {
         apiToken: state.settings.jiraApiToken,
       );
 
-      final keys = _drafts.map((d) => d.issueKey).toSet().toList();
+      // ---------- Delta-Filter anwenden ----------
+      final skippedDrafts = <DraftLog>[];
+      final draftsToSend = <DraftLog>[];
+
+      for (final d in _drafts) {
+        final isDeltaProtected =
+            state.deltaModeEnabled && (d.deltaState == DeltaState.duplicate || d.deltaState == DeltaState.overlap);
+
+        if (isDeltaProtected) {
+          skippedDrafts.add(d);
+        } else {
+          draftsToSend.add(d);
+        }
+      }
+
+      // Wenn alles nur Duplikat/Overlap ist → nichts senden, Infos anzeigen
+      if (draftsToSend.isEmpty) {
+        final skippedCount = skippedDrafts.length;
+
+        _log += 'Delta-Modus: Keine Worklogs gesendet, '
+            '$skippedCount Eintrag(e) wegen Duplikat/Überlappung übersprungen.\n';
+
+        final skippedDetails = skippedDrafts.take(25).map((d) {
+          final reason = d.deltaState == DeltaState.duplicate ? 'Duplikat' : 'Überlappung';
+          return '$reason: ${d.issueKey} '
+              '${DateFormat('dd.MM.yyyy HH:mm').format(d.start)}–${DateFormat('HH:mm').format(d.end)} '
+              '(${formatDuration(d.duration)}) '
+              '${d.note}';
+        }).join('\n');
+
+        setState(() {});
+
+        await _showInfoDialog(
+          'Keine Buchungen vorgenommen',
+          'Es wurden keine Worklogs an Jira gesendet, weil alle '
+              'im gewählten Zeitraum bereits als Duplikat oder überlappend erkannt wurden.\n\n'
+              'Übersprungene Einträge: $skippedCount\n\n'
+              '${skippedDetails.isEmpty ? '' : skippedDetails}',
+        );
+        return;
+      }
+
+      _log += 'Delta-Modus: ${skippedDrafts.length} Eintrag(e) wegen Duplikat/Überlappung übersprungen, '
+          '${draftsToSend.length} werden gesendet.\n';
+
+      // ---------- Issues auflösen (nur für die, die wir WIRKLICH schicken) ----------
+      final keys = draftsToSend.map((d) => d.issueKey).toSet().toList();
       final keyToId = <String, String>{};
       for (final k in keys) {
         final id = await jira.resolveIssueId(k);
@@ -2270,36 +2529,85 @@ class _HomePageState extends State<HomePage> {
       int ok = 0, fail = 0;
       final failures = <String>[];
 
-      for (final d in _drafts) {
+      for (final d in draftsToSend) {
         final key = _issueOverrides[_draftKey(d)] ?? d.issueKey;
         final keyOrId = keyToId[key] ?? key;
         final res = await worklogApi.createWorklog(
           issueKeyOrId: keyOrId,
-          started: d.start, // jetzt korrekt im API-Client formatiert
+          started: d.start,
           timeSpentSeconds: d.duration.inSeconds,
           comment: d.note,
         );
         if (res.ok) {
           ok++;
-          _log += 'OK (Jira) ${d.issueKey} ${DateFormat('dd.MM.yyyy').format(d.start)} ${d.duration.inMinutes}m\n';
+          _log += 'OK (Jira) $key '
+              '${DateFormat('dd.MM.yyyy').format(d.start)} '
+              '${d.duration.inMinutes}m\n';
         } else {
           fail++;
-          final line = 'FEHLER ${d.issueKey} ${DateFormat('dd.MM.yyyy HH:mm').format(d.start)}: ${res.body ?? ''}';
+          final line = 'FEHLER $key ${DateFormat('dd.MM.yyyy HH:mm').format(d.start)}: ${res.body ?? ''}';
           failures.add(line);
           _log += '$line\n';
         }
       }
 
-      _log += '\nFertig. Erfolgreich: $ok, Fehler: $fail\n';
+      final skippedCount = skippedDrafts.length;
+      _log += '\nFertig. Erfolgreich: $ok, Fehler: $fail, '
+          'Übersprungen (Duplikat/Überlappung): $skippedCount\n';
       setState(() {});
 
+      // Dialog-Text zusammensetzen
       if (fail == 0) {
-        await _showInfoDialog('Buchen erfolgreich', 'Alle $ok Worklogs wurden gebucht.');
+        final skippedDetails = skippedDrafts.take(25).map((d) {
+          final reason = d.deltaState == DeltaState.duplicate ? 'Duplikat' : 'Überlappung';
+          return '$reason: ${d.issueKey} '
+              '${DateFormat('dd.MM.yyyy HH:mm').format(d.start)}–${DateFormat('HH:mm').format(d.end)} '
+              '(${formatDuration(d.duration)}) '
+              '${d.note}';
+        }).join('\n');
+
+        final msg = StringBuffer()
+          ..writeln('Erfolgreich gebuchte Worklogs: $ok')
+          ..writeln('Fehler: $fail')
+          ..writeln('Übersprungen (Duplikat/Überlappung): $skippedCount');
+
+        if (skippedCount > 0 && skippedDetails.isNotEmpty) {
+          msg
+            ..writeln()
+            ..writeln('Übersprungene Einträge (Auszug):')
+            ..writeln(skippedDetails);
+        }
+
+        await _showInfoDialog('Buchen erfolgreich', msg.toString());
       } else {
         final details = failures.take(25).join('\n');
+
+        final skippedDetails = skippedDrafts.take(25).map((d) {
+          final reason = d.deltaState == DeltaState.duplicate ? 'Duplikat' : 'Überlappung';
+          return '$reason: ${d.issueKey} '
+              '${DateFormat('dd.MM.yyyy HH:mm').format(d.start)}–${DateFormat('HH:mm').format(d.end)} '
+              '(${formatDuration(d.duration)}) '
+              '${d.note}';
+        }).join('\n');
+
+        final msg = StringBuffer()
+          ..writeln('Erfolgreich: $ok')
+          ..writeln('Fehler: $fail')
+          ..writeln('Übersprungen (Duplikat/Überlappung): ${skippedDrafts.length}')
+          ..writeln()
+          ..writeln('Fehlschläge (Auszug):')
+          ..writeln(details);
+
+        if (skippedDrafts.isNotEmpty && skippedDetails.isNotEmpty) {
+          msg
+            ..writeln()
+            ..writeln('Übersprungene Einträge (Auszug):')
+            ..writeln(skippedDetails);
+        }
+
         await _showErrorDialog(
           'Buchen teilweise/fehlgeschlagen',
-          'Erfolgreich: $ok\nFehler: $fail\n\n$details',
+          msg.toString(),
         );
       }
     } catch (e, st) {
