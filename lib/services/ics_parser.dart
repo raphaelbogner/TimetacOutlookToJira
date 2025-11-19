@@ -40,6 +40,7 @@ class IcsEvent {
     this.description,
     this.attendeeCount = 0,
     this.selfPartstat,
+    this.recurrenceId,
     List<DateTime>? exdates,
   }) : exdates = exdates ?? [];
 
@@ -64,7 +65,36 @@ class IcsEvent {
 
   List<DateTime> exdates;
 
+  DateTime? recurrenceId;
+
   Duration get duration => end.difference(start);
+}
+
+extension IcsEventFlags on IcsEvent {
+  bool get isLikelyCancelledOrDeclined {
+    final s = (status ?? '').toUpperCase();
+    if (s.contains('CANCEL')) return true;
+
+    final title = summary.toLowerCase();
+    final desc = (description ?? '').toLowerCase();
+    if (title.contains('abgesagt') ||
+        title.contains('canceled') ||
+        title.contains('cancelled') ||
+        desc.contains('abgesagt') ||
+        desc.contains('canceled') ||
+        desc.contains('cancelled')) {
+      return true;
+    }
+
+    // Teilnahme-Status härter auswerten
+    final ps = selfPartstat?.toUpperCase();
+    if (ps != null && ps != 'NEEDS-ACTION' && ps != 'ACCEPTED' && ps != 'TENTATIVE') {
+      // z.B. DECLINED, DELEGATED, COMPLETED, IN-PROCESS ...
+      return true;
+    }
+
+    return false;
+  }
 }
 
 class IcsParseResult {
@@ -135,36 +165,58 @@ bool _tooLong(IcsEvent e) => e.duration > const Duration(hours: 10);
 //         RECURRENCE EXPANSION (Daily/Weekly + EXDATE)
 // =======================================================
 
-List<IcsEvent> _expandRecurringForWindow(
-  List<IcsEvent> recurring,
-  DateTime from,
-  DateTime to,
-) {
-  const maxIters = 5000; // Schutz gegen endlose Serien
+List<IcsEvent> _expandRecurringForWindow({
+  required List<IcsEvent> recurring,
+  required DateTime from,
+  required DateTime to,
+  Map<String, List<DateTime>> exceptionsByUid = const {},
+}) {
   final out = <IcsEvent>[];
 
   for (final e in recurring) {
     final rule = e.rrule;
     if (rule == null || rule.trim().isEmpty) continue;
 
+    // RRULE parsieren
     final parts = <String, String>{};
     for (final p in rule.split(';')) {
       final i = p.indexOf('=');
-      if (i > 0) parts[p.substring(0, i).toUpperCase()] = p.substring(i + 1);
+      if (i > 0) {
+        parts[p.substring(0, i).toUpperCase()] = p.substring(i + 1);
+      }
     }
 
     final freq = (parts['FREQ'] ?? '').toUpperCase();
     if (freq != 'DAILY' && freq != 'WEEKLY') {
-      if (!(e.end.isBefore(from) || e.start.isAfter(to))) out.add(e);
+      if (!(e.end.isBefore(from) || e.start.isAfter(to))) {
+        out.add(e);
+      }
       continue;
     }
 
     final until = parts['UNTIL'] != null ? _parseIcsDateTimeFlexible(parts['UNTIL']!) : null;
     final count = parts['COUNT'] != null ? int.tryParse(parts['COUNT']!) : null;
-    final byday = parts['BYDAY']?.split(',').map((s) => s.toUpperCase().trim()).toList() ?? const <String>[];
+    final interval = parts['INTERVAL'] != null ? (int.tryParse(parts['INTERVAL']!) ?? 1) : 1;
+
+    final rawByDay = parts['BYDAY'];
+    final byday = (rawByDay != null && rawByDay.isNotEmpty)
+        ? rawByDay.split(',').map((s) => s.toUpperCase().trim()).where((s) => s.isNotEmpty).toList()
+        : (freq == 'WEEKLY'
+            ? <String>[
+                const {
+                  DateTime.monday: 'MO',
+                  DateTime.tuesday: 'TU',
+                  DateTime.wednesday: 'WE',
+                  DateTime.thursday: 'TH',
+                  DateTime.friday: 'FR',
+                  DateTime.saturday: 'SA',
+                  DateTime.sunday: 'SU',
+                }[e.start.weekday]!,
+              ]
+            : const <String>[]);
 
     bool matchesByDay(DateTime dt) {
-      if (byday.isEmpty) return true;
+      if (freq != 'WEEKLY') return true;
       const map = {
         DateTime.monday: 'MO',
         DateTime.tuesday: 'TU',
@@ -177,50 +229,68 @@ List<IcsEvent> _expandRecurringForWindow(
       return byday.contains(map[dt.weekday]);
     }
 
-    DateTime instStart = e.start;
-    DateTime instEnd = e.end;
-    int emitted = 0;
-    DateTime hardEnd = to;
-    if (until != null && until.isBefore(hardEnd)) hardEnd = until;
-
-    int iters = 0;
-    while (instEnd.isBefore(from) && iters < maxIters) {
-      instStart = instStart.add(const Duration(days: 1));
-      instEnd = instEnd.add(const Duration(days: 1));
-      iters++;
+    bool inInterval(DateTime dt) {
+      if (interval <= 1) return true;
+      final base = DateTime(e.start.year, e.start.month, e.start.day);
+      final deltaDays = dt.difference(base).inDays;
+      if (freq == 'DAILY') {
+        return deltaDays % interval == 0;
+      }
+      if (freq == 'WEEKLY') {
+        final weeks = deltaDays ~/ 7;
+        return weeks % interval == 0;
+      }
+      return true;
     }
 
-    while (!instStart.isAfter(hardEnd) && iters < maxIters) {
-      iters++;
-      if (freq == 'DAILY' || (freq == 'WEEKLY' && matchesByDay(instStart))) {
-        final isExcluded =
-            e.exdates.any((ex) => ex.year == instStart.year && ex.month == instStart.month && ex.day == instStart.day);
-        if (!isExcluded) {
-          if (!(instEnd.isBefore(from) || instStart.isAfter(to))) {
-            out.add(IcsEvent(
-              start: instStart,
-              end: instEnd,
-              summary: e.summary,
-              allDay: e.allDay,
-              status: e.status,
-              transp: e.transp,
-              busyStatus: e.busyStatus,
-              uid: e.uid,
-              rrule: e.rrule,
-              categories: e.categories,
-              description: e.description,
-              attendeeCount: e.attendeeCount,
-              selfPartstat: e.selfPartstat,
-            ));
-            emitted++;
-            if (count != null && emitted >= count) break;
-          }
+    final exdatesFromExceptions = e.uid != null ? (exceptionsByUid[e.uid!] ?? const <DateTime>[]) : const <DateTime>[];
+
+    bool isExcluded(DateTime dt) {
+      bool hit(List<DateTime> xs) => xs.any((ex) => ex.year == dt.year && ex.month == dt.month && ex.day == dt.day);
+      return hit(e.exdates) || hit(exdatesFromExceptions);
+    }
+
+    var instStart = e.start;
+    var instEnd = e.end;
+    var emitted = 0;
+
+    // Loop über alle möglichen Tage, bis wir aus dem Fenster raus sind
+    while (true) {
+      if (instStart.isAfter(to)) break;
+      if (until != null && instStart.isAfter(until)) break;
+      if (count != null && emitted >= count) break;
+
+      final occurs = inInterval(instStart) &&
+          (freq == 'DAILY' || (freq == 'WEEKLY' && matchesByDay(instStart))) &&
+          !isExcluded(instStart);
+
+      if (occurs) {
+        emitted++; // COUNT zählt global
+
+        if (!(instEnd.isBefore(from) || instStart.isAfter(to))) {
+          out.add(IcsEvent(
+            start: instStart,
+            end: instEnd,
+            summary: e.summary,
+            allDay: e.allDay,
+            status: e.status,
+            transp: e.transp,
+            busyStatus: e.busyStatus,
+            uid: e.uid,
+            rrule: e.rrule,
+            categories: e.categories,
+            description: e.description,
+            attendeeCount: e.attendeeCount,
+            selfPartstat: e.selfPartstat,
+          ));
         }
       }
+
       instStart = instStart.add(const Duration(days: 1));
       instEnd = instEnd.add(const Duration(days: 1));
     }
   }
+
   return out;
 }
 
@@ -246,6 +316,7 @@ IcsParseResult parseIcs(String content, {String selfEmail = ''}) {
   List<DateTime> exdates = [];
   int attendeeCount = 0;
   String? curSelfPartstat;
+  DateTime? curRecurrenceId;
   bool inEvent = false;
 
   DateTime? valueDateToStart(String v) {
@@ -271,6 +342,7 @@ IcsParseResult parseIcs(String content, {String selfEmail = ''}) {
       exdates = [];
       attendeeCount = 0;
       curSelfPartstat = null;
+      curRecurrenceId = null;
       continue;
     }
     if (raw == 'END:VEVENT') {
@@ -329,12 +401,22 @@ IcsParseResult parseIcs(String content, {String selfEmail = ''}) {
           attendeeCount: attendeeCount,
           selfPartstat: curSelfPartstat,
           exdates: exdates,
+          recurrenceId: curRecurrenceId,
         ));
       }
       continue;
     }
 
     if (!inEvent) continue;
+
+    if (raw.startsWith('RECURRENCE-ID')) {
+      final idx = raw.indexOf(':');
+      if (idx > 0) {
+        final v = raw.substring(idx + 1);
+        curRecurrenceId = _parseIcsDateTimeFlexible(v);
+      }
+      continue;
+    }
 
     if (raw.startsWith('EXDATE')) {
       final idx = raw.indexOf(':');
@@ -441,23 +523,41 @@ class _IcsDayCache {
 
     final simple = <IcsEvent>[];
     final recurring = <IcsEvent>[];
+    final exceptionsByUid = <String, List<DateTime>>{};
+
     for (final e in allEvents) {
-      if ((e.rrule ?? '').trim().isEmpty) {
-        simple.add(e);
-      } else {
+      final hasRrule = (e.rrule ?? '').trim().isNotEmpty;
+      final hasRecurrenceId = e.recurrenceId != null;
+
+      if (hasRrule) {
         recurring.add(e);
+      } else {
+        simple.add(e);
+      }
+
+      if (hasRecurrenceId && e.uid != null && e.isLikelyCancelledOrDeclined) {
+        (exceptionsByUid[e.uid!] ??= []).add(e.recurrenceId!);
       }
     }
 
     final candidates = <IcsEvent>[
       ...simple.where((e) => !(e.end.isBefore(from) || e.start.isAfter(to))),
-      ..._expandRecurringForWindow(recurring, from, to),
+      ..._expandRecurringForWindow(
+        recurring: recurring,
+        from: from,
+        to: to,
+        exceptionsByUid: exceptionsByUid,
+      ),
     ];
 
     final hasDayOff = candidates.any(_isAllDayDayOff);
 
     final meetings = candidates.where((e) {
+      // Alles was sehr wahrscheinlich storniert / abgelehnt ist, fliegt raus
+      if (e.isLikelyCancelledOrDeclined) return false;
+      // zusätzlicher, konservativer Legacy-Check
       if (_isCancelled(e)) return false;
+
       if (e.allDay) return false;
       if (_crossesMidnight(e)) return false;
       if (_tooLong(e)) return false;
@@ -470,7 +570,9 @@ class _IcsDayCache {
         return false;
       }
 
-      if (e.attendeeCount == 0) return false;
+      final isExceptionInstance = e.recurrenceId != null;
+
+      if (e.attendeeCount == 0 && !isExceptionInstance) return false;
 
       final title = e.summary.trim().toLowerCase();
       if (title.isEmpty || _nonMeetingHints.any((k) => title.contains(k))) return false;
@@ -505,7 +607,9 @@ class _IcsDayCache {
         merged.add(m);
       } else {
         final last = merged.last;
-        if (m.start.isBefore(last.end)) {
+
+        final sameUid = last.uid != null && last.uid == m.uid;
+        if (sameUid && m.start.isBefore(last.end)) {
           final newEnd = m.end.isAfter(last.end) ? m.end : last.end;
           merged[merged.length - 1] = IcsEvent(
             start: last.start,
@@ -590,99 +694,21 @@ class _UserRangeCache {
     }
 
     clear();
+
     _userEmail = userEmail.trim().toLowerCase();
     _from = DateTime(from.year, from.month, from.day);
     _to = DateTime(to.year, to.month, to.day, 23, 59, 59, 999);
 
     if (allEvents.isEmpty) return;
 
-    final simple = <IcsEvent>[];
-    final recurring = <IcsEvent>[];
-    for (final e in allEvents) {
-      ((e.rrule ?? '').trim().isEmpty ? simple : recurring).add(e);
-    }
-
-    final candidates = <IcsEvent>[
-      ...simple.where((e) => !(e.end.isBefore(_from!) || e.start.isAfter(_to!))),
-      ..._expandRecurringForWindow(recurring, _from!, _to!),
-    ];
-
-    for (final e in candidates) {
-      if (_isCancelled(e)) continue;
-      if (e.allDay) continue;
-      if (_crossesMidnight(e)) continue;
-      if (_tooLong(e)) continue;
-
-      final transpUpper = (e.transp ?? '').toUpperCase();
-      if (transpUpper == 'TRANSPARENT') continue;
-
-      final busyUpper = (e.busyStatus ?? '').toUpperCase();
-      if (busyUpper == 'FREE' || busyUpper == 'WORKINGELSEWHERE' || busyUpper == 'OOF') {
-        continue;
+    var day = _from!;
+    while (!day.isAfter(_to!)) {
+      final dc = buildDayCalendarCached(allEvents: allEvents, day: day);
+      if (dc.meetings.isNotEmpty) {
+        final key = DateTime(day.year, day.month, day.day).millisecondsSinceEpoch;
+        _bucket[key] = dc.meetings;
       }
-
-      if (e.attendeeCount == 0) continue;
-
-      final ps = e.selfPartstat?.toUpperCase();
-      if (ps != null && ps != 'NEEDS-ACTION' && ps != 'ACCEPTED' && ps != 'TENTATIVE') continue;
-
-      final title = e.summary.trim().toLowerCase();
-      if (title.isEmpty || _nonMeetingHints.any((k) => title.contains(k))) continue;
-
-      final start = e.start.isBefore(_from!) ? _from! : e.start;
-      final end = e.end.isAfter(_to!) ? _to! : e.end;
-      if (!end.isAfter(start)) continue;
-
-      final dayKey = DateTime(start.year, start.month, start.day).millisecondsSinceEpoch;
-      final clipped = IcsEvent(
-        start: start,
-        end: end,
-        summary: e.summary,
-        allDay: false,
-        status: e.status,
-        transp: e.transp,
-        busyStatus: e.busyStatus,
-        uid: e.uid,
-        rrule: e.rrule,
-        categories: e.categories,
-        description: e.description,
-        attendeeCount: e.attendeeCount,
-        selfPartstat: e.selfPartstat,
-      );
-
-      (_bucket[dayKey] ??= <IcsEvent>[]).add(clipped);
-    }
-
-    for (final entry in _bucket.entries) {
-      final list = entry.value..sort((a, b) => a.start.compareTo(b.start));
-      if (list.length <= 1) continue;
-
-      final merged = <IcsEvent>[list.first];
-      for (var i = 1; i < list.length; i++) {
-        final last = merged.last;
-        final cur = list[i];
-        if (cur.start.isBefore(last.end)) {
-          final newEnd = cur.end.isAfter(last.end) ? cur.end : last.end;
-          merged[merged.length - 1] = IcsEvent(
-            start: last.start,
-            end: newEnd,
-            summary: '${last.summary} + ${cur.summary}',
-            allDay: false,
-            status: last.status,
-            transp: last.transp,
-            busyStatus: last.busyStatus,
-            uid: last.uid,
-            rrule: last.rrule,
-            categories: last.categories,
-            description: last.description,
-            attendeeCount: last.attendeeCount,
-            selfPartstat: last.selfPartstat,
-          );
-        } else {
-          merged.add(cur);
-        }
-      }
-      _bucket[entry.key] = merged;
+      day = day.add(const Duration(days: 1));
     }
   }
 }

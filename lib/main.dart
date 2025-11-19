@@ -492,6 +492,26 @@ class AppState extends ChangeNotifier {
     _applyDeltaToDrafts(drafts, all);
     notifyListeners();
   }
+
+  /// Gibt für einen Meeting-Titel das passende Jira-Ticket zurück.
+  String resolveMeetingIssueKeyForTitle(String title) {
+    final rules = settings.meetingRules;
+    if (rules.isEmpty) return settings.meetingIssueKey;
+
+    final lowerTitle = title.toLowerCase();
+
+    for (final rule in rules) {
+      final pattern = rule.pattern.trim();
+      if (pattern.isEmpty) continue;
+
+      if (lowerTitle.contains(pattern.toLowerCase())) {
+        final ticket = rule.issueKey.trim();
+        return ticket.isEmpty ? settings.meetingIssueKey : ticket;
+      }
+    }
+
+    return settings.meetingIssueKey;
+  }
 }
 
 class HomePage extends StatefulWidget {
@@ -1339,12 +1359,32 @@ class _HomePageState extends State<HomePage> {
         .map((h) => TextEditingController(text: h))
         .toList();
 
+    // Meeting-Regeln
+    final meetingRules = List<MeetingRule>.from(s.meetingRules);
+    final meetingRulePatternCtrls = <TextEditingController>[];
+    final meetingRuleTicketCtrls = <TextEditingController>[];
+
+    for (final r in meetingRules) {
+      meetingRulePatternCtrls.add(TextEditingController(text: r.pattern));
+      meetingRuleTicketCtrls.add(TextEditingController(text: r.issueKey));
+    }
+
+    // Alle vorhandenen Meeting-Titel aus ICS (einmalig für Suggestions)
+    final allMeetingTitles = context
+        .read<AppState>()
+        .icsEvents
+        .map((e) => e.summary.trim())
+        .where((t) => t.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+
     await showDialog(
       context: context,
       useSafeArea: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlg) => DefaultTabController(
-          length: 4,
+          length: 5,
           child: LayoutBuilder(
             builder: (c, cons) {
               final media = MediaQuery.of(c);
@@ -1407,28 +1447,50 @@ class _HomePageState extends State<HomePage> {
                         TabBar(
                           isScrollable: true,
                           tabs: [
-                            Tab(
-                                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                              settingsIcon(jiraOk()),
-                              const SizedBox(width: 6),
-                              const Text('Jira'),
-                            ])),
-                            Tab(
-                                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                              settingsIcon(timetacOk()),
-                              const SizedBox(width: 6),
-                              const Text('Timetac'),
-                            ])),
-                            Tab(
-                                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                              settingsIcon(gitlabOk()),
-                              const SizedBox(width: 6),
-                              const Text('GitLab'),
-                            ])),
                             const Tab(
-                                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                              Text('Non-Meeting Keywords'),
-                            ])),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [Text('Meeting-Regeln')],
+                              ),
+                            ),
+                            Tab(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  settingsIcon(jiraOk()),
+                                  const SizedBox(width: 6),
+                                  const Text('Jira'),
+                                ],
+                              ),
+                            ),
+                            Tab(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  settingsIcon(timetacOk()),
+                                  const SizedBox(width: 6),
+                                  const Text('Timetac'),
+                                ],
+                              ),
+                            ),
+                            Tab(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  settingsIcon(gitlabOk()),
+                                  const SizedBox(width: 6),
+                                  const Text('GitLab'),
+                                ],
+                              ),
+                            ),
+                            const Tab(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text('Non-Meeting Keywords'),
+                                ],
+                              ),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -1440,6 +1502,192 @@ class _HomePageState extends State<HomePage> {
                             child: TabBarView(
                               physics: const NeverScrollableScrollPhysics(),
                               children: [
+                                // ------- MEETING-REGELN -------
+                                SingleChildScrollView(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    spacing: 8,
+                                    children: [
+                                      sectionTitle(ctx, 'Meeting-Regeln'),
+                                      const Text(
+                                        'Regeln werden von oben nach unten geprüft. '
+                                        'Die erste passende Regel bestimmt das Ticket. '
+                                        'Verglichen wird gegen den Meeting-Titel (Summary).',
+                                      ),
+                                      const SizedBox(height: 8),
+                                      ListView.builder(
+                                        shrinkWrap: true,
+                                        physics: const NeverScrollableScrollPhysics(),
+                                        itemCount: meetingRulePatternCtrls.length,
+                                        itemBuilder: (ctx2, i) {
+                                          return Card(
+                                            margin: const EdgeInsets.symmetric(vertical: 4),
+                                            child: Padding(
+                                              padding: const EdgeInsets.all(8.0),
+                                              child: Row(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  // Up/Down zum Reihenfolge ändern
+                                                  Column(
+                                                    children: [
+                                                      IconButton(
+                                                        tooltip: 'Nach oben',
+                                                        icon: const Icon(Icons.arrow_upward, size: 18),
+                                                        onPressed: i == 0
+                                                            ? null
+                                                            : () {
+                                                                final p = meetingRulePatternCtrls.removeAt(i);
+                                                                final t = meetingRuleTicketCtrls.removeAt(i);
+                                                                meetingRulePatternCtrls.insert(i - 1, p);
+                                                                meetingRuleTicketCtrls.insert(i - 1, t);
+                                                                markRebuild(setDlg);
+                                                              },
+                                                      ),
+                                                      IconButton(
+                                                        tooltip: 'Nach unten',
+                                                        icon: const Icon(Icons.arrow_downward, size: 18),
+                                                        onPressed: i == meetingRulePatternCtrls.length - 1
+                                                            ? null
+                                                            : () {
+                                                                final p = meetingRulePatternCtrls.removeAt(i);
+                                                                final t = meetingRuleTicketCtrls.removeAt(i);
+                                                                meetingRulePatternCtrls.insert(i + 1, p);
+                                                                meetingRuleTicketCtrls.insert(i + 1, t);
+                                                                markRebuild(setDlg);
+                                                              },
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Expanded(
+                                                    child: Column(
+                                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                                      children: [
+                                                        Row(
+                                                          children: [
+                                                            Expanded(
+                                                              child: TextField(
+                                                                controller: meetingRulePatternCtrls[i],
+                                                                decoration: const InputDecoration(
+                                                                  labelText: 'Meeting-Titel enthält…',
+                                                                ),
+                                                                onChanged: (_) => markRebuild(setDlg),
+                                                              ),
+                                                            ),
+                                                            const SizedBox(width: 8),
+                                                            if (allMeetingTitles.isNotEmpty)
+                                                              PopupMenuButton<String>(
+                                                                tooltip: 'Vorschläge aus vorhandenen Meeting-Titeln',
+                                                                icon: const Icon(Icons.arrow_drop_down),
+                                                                itemBuilder: (_) {
+                                                                  final query = meetingRulePatternCtrls[i]
+                                                                      .text
+                                                                      .trim()
+                                                                      .toLowerCase();
+
+                                                                  // Wenn nichts eingegeben → alles, sonst gefiltert
+                                                                  final filtered = allMeetingTitles
+                                                                      .where((t) {
+                                                                        if (query.isEmpty) return true;
+                                                                        return t.toLowerCase().contains(query);
+                                                                      })
+                                                                      .take(25)
+                                                                      .toList(); // Hard-Cap, damit das Menü nicht explodiert
+
+                                                                  if (filtered.isEmpty) {
+                                                                    return const [
+                                                                      PopupMenuItem<String>(
+                                                                        enabled: false,
+                                                                        value: '',
+                                                                        child: Text('Keine passenden Titel gefunden'),
+                                                                      ),
+                                                                    ];
+                                                                  }
+
+                                                                  return filtered
+                                                                      .map(
+                                                                        (t) => PopupMenuItem<String>(
+                                                                          value: t,
+                                                                          child: Text(
+                                                                            t,
+                                                                            overflow: TextOverflow.ellipsis,
+                                                                          ),
+                                                                        ),
+                                                                      )
+                                                                      .toList();
+                                                                },
+                                                                onSelected: (value) {
+                                                                  if (value.isEmpty) return;
+                                                                  meetingRulePatternCtrls[i].text = value;
+                                                                  markRebuild(setDlg);
+                                                                },
+                                                              ),
+                                                          ],
+                                                        ),
+                                                        const SizedBox(height: 8),
+                                                        Row(
+                                                          children: [
+                                                            Expanded(
+                                                              child: TextField(
+                                                                controller: meetingRuleTicketCtrls[i],
+                                                                decoration: const InputDecoration(
+                                                                  labelText: 'Jira-Ticket (z. B. ABC-123)',
+                                                                ),
+                                                                onChanged: (_) => markRebuild(setDlg),
+                                                              ),
+                                                            ),
+                                                            const SizedBox(width: 8),
+                                                            IconButton(
+                                                              tooltip: 'Ticket suchen',
+                                                              icon: const Icon(Icons.search),
+                                                              onPressed: () async {
+                                                                final current = meetingRuleTicketCtrls[i].text.trim();
+                                                                final picked = await _openIssuePickerDialog(
+                                                                  originalKey: current.isEmpty ? 'ABC-123' : current,
+                                                                  currentKey: current,
+                                                                  title: 'Meeting-Regel: Ticket wählen',
+                                                                  showOriginalHint: false,
+                                                                );
+                                                                if (picked != null && picked.isNotEmpty) {
+                                                                  meetingRuleTicketCtrls[i].text = picked;
+                                                                  markRebuild(setDlg);
+                                                                }
+                                                              },
+                                                            ),
+                                                            IconButton(
+                                                              tooltip: 'Regel löschen',
+                                                              icon: const Icon(Icons.delete),
+                                                              onPressed: () {
+                                                                meetingRulePatternCtrls.removeAt(i);
+                                                                meetingRuleTicketCtrls.removeAt(i);
+                                                                markRebuild(setDlg);
+                                                              },
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                      const SizedBox(height: 8),
+                                      FilledButton.icon(
+                                        onPressed: () {
+                                          meetingRulePatternCtrls.add(TextEditingController());
+                                          meetingRuleTicketCtrls.add(TextEditingController());
+                                          markRebuild(setDlg);
+                                        },
+                                        icon: const Icon(Icons.add),
+                                        label: const Text('Neue Regel hinzufügen'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
                                 // ------- JIRA -------
                                 SingleChildScrollView(
                                   child: Column(
@@ -1872,6 +2120,7 @@ class _HomePageState extends State<HomePage> {
                                   ),
                                 ),
 
+                                // ------- NON-MEETING KEYWORDS -------
                                 SingleChildScrollView(
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1994,7 +2243,7 @@ class _HomePageState extends State<HomePage> {
                                       ),
                                     ],
                                   ),
-                                )
+                                ),
                               ],
                             ),
                           ),
@@ -2040,6 +2289,18 @@ class _HomePageState extends State<HomePage> {
                                 st.gitlabToken = glTokCtl.text.trim();
                                 st.gitlabProjectIds = glProjCtl.text.trim();
                                 st.gitlabAuthorEmail = glMailCtl.text.trim();
+
+                                // Meeting-Regeln übernehmen
+                                final newMeetingRules = <MeetingRule>[];
+                                for (var i = 0; i < meetingRulePatternCtrls.length; i++) {
+                                  final pattern = meetingRulePatternCtrls[i].text.trim();
+                                  final ticket = meetingRuleTicketCtrls[i].text.trim();
+                                  if (pattern.isEmpty || ticket.isEmpty) continue;
+                                  newMeetingRules.add(
+                                    MeetingRule(pattern: pattern, issueKey: ticket),
+                                  );
+                                }
+                                st.meetingRules = newMeetingRules;
 
                                 await app.savePrefs();
 
@@ -2210,20 +2471,39 @@ class _HomePageState extends State<HomePage> {
         final meetingCutters = <WorkWindow>[];
         final meetingDrafts = <DraftLog>[];
         if (!ignoreOutlook) {
-          final events = meetingsForUserOnDayFast(day: day, userEmail: state.settings.jiraEmail);
+          final eventsRaw = meetingsForUserOnDayFast(
+            day: day,
+            userEmail: state.settings.jiraEmail,
+          );
+
+          // Zusätzlicher Schutz: offensichtliche Absagen/Ablehnungen raus
+          final events = eventsRaw.where((e) => !e.isLikelyCancelledOrDeclined).toList();
+
+          // Optionales Logging – hilft beim Debuggen
+          final skipped = eventsRaw.length - events.length;
+          if (skipped > 0) {
+            _log += '  (Info) $skipped Meeting(s) wegen Absage/Ablehnung ignoriert.\n';
+          }
+
           for (final e in events) {
             meetingCutters.add(WorkWindow(e.start, e.end));
+
+            final titleText = e.summary.trim();
+            final issueKeyForMeeting = state.resolveMeetingIssueKeyForTitle(titleText);
+
             for (final w in workWindows) {
               final s1 = e.start.isAfter(w.start) ? e.start : w.start;
               final e1 = e.end.isBefore(w.end) ? e.end : w.end;
               if (e1.isAfter(s1)) {
-                final title = (e.summary.trim().isEmpty) ? '' : ' – ${e.summary.trim()}';
-                meetingDrafts.add(DraftLog(
-                  start: s1,
-                  end: e1,
-                  issueKey: state.settings.meetingIssueKey,
-                  note: 'Meeting ${DateFormat('HH:mm').format(s1)}–${DateFormat('HH:mm').format(e1)}$title',
-                ));
+                final titleSuffix = titleText.isEmpty ? '' : ' – $titleText';
+                meetingDrafts.add(
+                  DraftLog(
+                    start: s1,
+                    end: e1,
+                    issueKey: issueKeyForMeeting,
+                    note: 'Meeting ${DateFormat('HH:mm').format(s1)}–${DateFormat('HH:mm').format(e1)}$titleSuffix',
+                  ),
+                );
               }
             }
           }

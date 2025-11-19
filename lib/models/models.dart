@@ -34,6 +34,9 @@ class SettingsModel {
   // non meeting hints
   String nonMeetingHintsMultiline;
 
+  // meeting title to ticket rules
+  List<MeetingRule> meetingRules;
+
   // ---- Feste, unveränderliche Defaults (öffentlich) ----
   static const List<String> defaultNonMeetingHintsList = <String>[
     'homeoffice',
@@ -57,6 +60,15 @@ class SettingsModel {
     'travel',
     'anwesenheit',
     'präsenz',
+    'teilzeit',
+    'weihnacht',
+    'christmas',
+    'save the date',
+    'ski',
+    'ausflug',
+    'bbq',
+    'grillen',
+    'feier',
   ];
 
   SettingsModel({
@@ -85,6 +97,7 @@ class SettingsModel {
     this.gitlabProjectIds = '',
     this.gitlabAuthorEmail = '',
     this.gitlabLookbackDays = 30,
+    this.meetingRules = const [],
     String? nonMeetingHintsMultiline,
   }) : nonMeetingHintsMultiline = nonMeetingHintsMultiline ?? defaultNonMeetingHintsMultiline;
 
@@ -126,6 +139,7 @@ class SettingsModel {
         'gitlabAuthorEmail': gitlabAuthorEmail,
         'gitlabLookbackDays': gitlabLookbackDays,
         'nonMeetingHintsMultiline': nonMeetingHintsMultiline,
+        'meetingRules': meetingRules.map((r) => r.toJson()).toList(),
       };
 
   factory SettingsModel.fromJson(Map<String, dynamic> m) => SettingsModel(
@@ -156,6 +170,9 @@ class SettingsModel {
             ? m['gitlabLookbackDays'] as int
             : int.tryParse((m['gitlabLookbackDays'] ?? '30').toString()) ?? 30,
         nonMeetingHintsMultiline: (m['nonMeetingHintsMultiline'] ?? defaultNonMeetingHintsMultiline) as String,
+        meetingRules: ((m['meetingRules'] as List?) ?? const [])
+            .map((e) => MeetingRule.fromJson(e as Map<String, dynamic>))
+            .toList(),
       );
 }
 
@@ -219,4 +236,24 @@ class DayTotals {
     required this.timeCompensationHours,
     required this.doctorHours,
   });
+}
+
+class MeetingRule {
+  MeetingRule({
+    required this.pattern,
+    required this.issueKey,
+  });
+
+  String pattern; // z. B. "1:1", "Code Review"
+  String issueKey; // z. B. "MGMT-123"
+
+  factory MeetingRule.fromJson(Map<String, dynamic> json) => MeetingRule(
+        pattern: (json['pattern'] ?? '') as String,
+        issueKey: (json['issueKey'] ?? '') as String,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'pattern': pattern,
+        'issueKey': issueKey,
+      };
 }
