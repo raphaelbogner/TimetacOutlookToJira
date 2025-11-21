@@ -20,6 +20,7 @@ import 'services/jira_api.dart';
 import 'services/jira_worklog_api.dart';
 import 'ui/preview_utils.dart';
 import 'widgets/preview_table.dart';
+import 'widgets/draft_log_tile.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -532,6 +533,7 @@ class _HomePageState extends State<HomePage> {
   bool _busy = false;
   String _log = '';
   List<DraftLog> _drafts = [];
+  List<DraftLog> _originalDrafts = []; // Backup for reset
   Map<String, String> _jiraSummaryCache = {};
   int _tabIndex = 0;
 
@@ -962,6 +964,201 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  void _splitLog(DraftLog log) {
+    final duration = log.duration;
+    if (duration.inMinutes < 2) return;
+
+    final half = Duration(minutes: (duration.inMinutes / 2).round());
+    final mid = log.start.add(half);
+
+    final part1 = DraftLog(
+      start: log.start,
+      end: mid,
+      issueKey: log.issueKey,
+      note: log.note,
+      deltaState: log.deltaState,
+      isManuallyModified: true,
+    );
+    final part2 = DraftLog(
+      start: mid,
+      end: log.end,
+      issueKey: log.issueKey,
+      note: log.note,
+      deltaState: log.deltaState,
+      isManuallyModified: true,
+    );
+
+    setState(() {
+      final idx = _drafts.indexOf(log);
+      if (idx != -1) {
+        _drafts.removeAt(idx);
+        _drafts.insert(idx, part2);
+        _drafts.insert(idx, part1);
+      }
+    });
+  }
+
+  void _mergeLog(DraftLog log, bool up) {
+    setState(() {
+      final idx = _drafts.indexOf(log);
+      if (idx == -1) return;
+
+      if (up) {
+        if (idx > 0) {
+          final prev = _drafts[idx - 1];
+          // Prevent cross-day merge
+          if (prev.start.day != log.start.day || prev.start.month != log.start.month || prev.start.year != log.start.year) {
+             return;
+          }
+
+          prev.end = log.end;
+          if (prev.note != log.note) {
+            prev.note = '${prev.note} | ${log.note}';
+          }
+          prev.isManuallyModified = true;
+          _drafts.removeAt(idx);
+        }
+      } else {
+        if (idx < _drafts.length - 1) {
+          final next = _drafts[idx + 1];
+          // Prevent cross-day merge
+          if (next.start.day != log.start.day || next.start.month != log.start.month || next.start.year != log.start.year) {
+             return;
+          }
+
+          log.end = next.end;
+          if (log.note != next.note) {
+            log.note = '${log.note} | ${next.note}';
+          }
+          log.isManuallyModified = true;
+          _drafts.removeAt(idx + 1);
+        }
+      }
+    });
+  }
+
+  void _updateLogTime(DraftLog log, DateTime newStart, DateTime newEnd) {
+    setState(() {
+      final idx = _drafts.indexOf(log);
+      if (idx == -1) return;
+
+      final oldStart = log.start;
+      final oldEnd = log.end;
+
+      log.start = newStart;
+      log.end = newEnd;
+      log.isManuallyModified = true;
+
+      // Smart Adjustment
+      if (idx > 0) {
+        final prev = _drafts[idx - 1];
+        if (_isSameDay(prev.start, log.start) && prev.end.isAtSameMomentAs(oldStart)) {
+          // If previous ended exactly when this one started, update previous end
+          if (newStart.isAfter(prev.start)) {
+             prev.end = newStart;
+             prev.isManuallyModified = true;
+          }
+        }
+      }
+
+      if (idx < _drafts.length - 1) {
+        final next = _drafts[idx + 1];
+        if (_isSameDay(next.start, log.start) && next.start.isAtSameMomentAs(oldEnd)) {
+          // If next started exactly when this one ended, update next start
+          if (newEnd.isBefore(next.end)) {
+            next.start = newEnd;
+            next.isManuallyModified = true;
+          }
+        }
+      }
+      
+      // Re-sort just in case, though usually not needed if small adjustments
+      _drafts.sort((a, b) => a.start.compareTo(b.start));
+    });
+  }
+
+  void _deleteLog(DraftLog log) {
+    setState(() {
+      final idx = _drafts.indexOf(log);
+      if (idx != -1) {
+        // Smart Delete: Extend previous log if contiguous
+        if (idx > 0) {
+          final prev = _drafts[idx - 1];
+          if (_isSameDay(prev.start, log.start) && prev.end.isAtSameMomentAs(log.start)) {
+             prev.end = log.end;
+             prev.isManuallyModified = true;
+             
+             // Check if we now overlap with next (shouldn't happen if log was valid, but good to be safe)
+             if (idx < _drafts.length - 1) {
+               final next = _drafts[idx + 1];
+               if (_isSameDay(prev.start, next.start) && prev.end.isAfter(next.start)) {
+                 prev.end = next.start;
+               }
+             }
+          }
+        }
+        _drafts.removeAt(idx);
+      }
+    });
+  }
+
+  void _insertLog(int indexAfter, DateTime start) {
+    setState(() {
+      // Default duration 5 mins
+      var end = start.add(const Duration(minutes: 5));
+      
+      // Smart Insert: Shift next log if overlap
+      if (indexAfter < _drafts.length) {
+        final next = _drafts[indexAfter];
+        if (_isSameDay(next.start, start)) {
+           // If new log ends after next starts, push next start
+           if (end.isAfter(next.start)) {
+             next.start = end;
+             // If that makes next duration negative/zero, push end too? 
+             // Let's just ensure min 1 min for next
+             if (next.end.difference(next.start).inMinutes < 1) {
+               next.end = next.start.add(const Duration(minutes: 1));
+             }
+           }
+        }
+      }
+      
+      final newLog = DraftLog(
+        start: start,
+        end: end,
+        issueKey: context.read<AppState>().settings.fallbackIssueKey,
+        note: '',
+        deltaState: DeltaState.newEntry,
+        isManuallyModified: true,
+      );
+      
+      _drafts.insert(indexAfter, newLog);
+    });
+  }
+
+  void _resetDay(String dayKey) {
+    // dayKey format: dd.MM.yyyy
+    setState(() {
+      // 1. Remove current drafts for this day
+      _drafts.removeWhere((d) => DateFormat('dd.MM.yyyy').format(d.start) == dayKey);
+      
+      // 2. Find original drafts for this day
+      final originalForDay = _originalDrafts.where((d) => DateFormat('dd.MM.yyyy').format(d.start) == dayKey);
+      
+      // 3. Add copies of original drafts
+      _drafts.addAll(originalForDay.map((d) => d.copy()));
+      
+      // 4. Sort
+      _drafts.sort((a, b) => a.start.compareTo(b.start));
+    });
+  }
+
+  void _resetAll() {
+    setState(() {
+      _drafts = _originalDrafts.map((d) => d.copy()).toList();
+    });
+  }
+
   Widget _plannedList(BuildContext context, List<DraftLog> drafts) {
     final settings = context.read<AppState>().settings;
     final jira = JiraApi(baseUrl: settings.jiraBaseUrl, email: settings.jiraEmail, apiToken: settings.jiraApiToken);
@@ -978,66 +1175,108 @@ class _HomePageState extends State<HomePage> {
       child: Padding(
         padding: const EdgeInsets.all(12.0),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('Geplante Worklogs', style: Theme.of(context).textTheme.titleMedium),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Geplante Worklogs', style: Theme.of(context).textTheme.titleMedium),
+              TextButton.icon(
+                onPressed: _resetAll,
+                icon: const Icon(Icons.restore, size: 16),
+                label: const Text('Alle Zeitänderungen zurücksetzen'),
+              ),
+            ],
+          ),
           const SizedBox(height: 8),
           _deltaLegend(),
           const SizedBox(height: 16),
           for (final day in dayKeys) ...[
-            Text(day, style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 4),
+            Row(
+              children: [
+                Text(day, style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: () => _resetDay(day),
+                  icon: const Icon(Icons.restore, size: 16),
+                  label: const Text('Zeitänderungen zurücksetzen'),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
             for (final w in byDay[day]!)
               Padding(
                 padding: const EdgeInsets.only(left: 8, bottom: 2),
                 child: Builder(builder: (_) {
                   final draftId = _draftKey(w);
                   final effectiveKey = _issueOverrides[draftId] ?? w.issueKey;
-                  final maybeTitle = (effectiveKey != meetingKey) ? (_jiraSummaryCache[effectiveKey] ?? '') : '';
-                  final line = '$effectiveKey  ${_hhmm(w.start)}–${_hhmm(w.end)}  (${formatDuration(w.duration)})  '
-                      '${w.note}${maybeTitle.isNotEmpty ? ' – $maybeTitle' : ''}';
-
-                  // Stil je nach Delta-Status
-                  TextStyle style = const TextStyle(fontFamily: 'monospace');
-                  switch (w.deltaState) {
-                    case DeltaState.newEntry:
-                      // Standard
-                      break;
-                    case DeltaState.duplicate:
-                      style = style.copyWith(color: Colors.grey);
-                      break;
-                    case DeltaState.overlap:
-                      style = style.copyWith(color: Colors.orange);
-                      break;
+                  
+                  // Override key in draft temporarily for display if needed, 
+                  // but DraftLogTile uses draft.issueKey. 
+                  // Actually we should sync them.
+                  if (effectiveKey != w.issueKey) {
+                     w.issueKey = effectiveKey;
                   }
 
-                  return Row(
+                  final idx = _drafts.indexOf(w);
+                  // Check bounds and same day for merge
+                  final canUp = idx > 0 && _isSameDay(_drafts[idx - 1].start, w.start);
+                  final canDown = idx < _drafts.length - 1 && _isSameDay(_drafts[idx + 1].start, w.start);
+
+                  return Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _deltaBadge(w),
-                      const SizedBox(width: 8),
-                      IconButton(
-                        tooltip: 'Ticket ändern',
-                        icon: const Icon(Icons.swap_horiz),
-                        onPressed: () async {
-                          final picked = await _openIssuePickerDialog(
-                            originalKey: w.issueKey,
-                            currentKey: effectiveKey,
-                            title: 'Ticket für ${DateFormat('dd.MM.yyyy HH:mm').format(w.start)} ändern',
-                          );
-                          if (picked != null && picked.isNotEmpty) {
-                            setState(() {
-                              _issueOverrides[draftId] = picked;
-                              if (!_jiraSummaryCache.containsKey(picked)) {
-                                jira.fetchSummariesByKeys({picked}).then((m) {
-                                  if (m.isNotEmpty && mounted) {
-                                    setState(() => _jiraSummaryCache.addAll(m));
-                                  }
-                                });
-                              }
-                            });
-                          }
+                      // Insert Divider BEFORE first log of day
+                      if (w == byDay[day]!.first)
+                        _HoverableInsertDivider(
+                          onInsert: () {
+                             // Insert before this log
+                             // Start = w.start - 5min
+                             final start = w.start.subtract(const Duration(minutes: 5));
+                             _insertLog(idx, start);
+                          },
+                        ),
+
+                      DraftLogTile(
+                        key: ValueKey(w),
+                        draft: w,
+                        canMergeUp: canUp,
+                        canMergeDown: canDown,
+                        onChanged: () => setState(() {}),
+                        onSplit: () => _splitLog(w),
+                        onMerge: (up) => _mergeLog(w, up),
+                        onTimeChanged: (s, e) => _updateLogTime(w, s, e),
+                        onDelete: () => _deleteLog(w),
+                        onTicketChanged: (newKey) {
+                          setState(() {
+                            _issueOverrides[draftId] = newKey;
+                            w.issueKey = newKey;
+                            w.isManuallyModified = true;
+                            if (!_jiraSummaryCache.containsKey(newKey)) {
+                              jira.fetchSummariesByKeys({newKey}).then((m) {
+                                if (m.isNotEmpty && mounted) {
+                                  setState(() => _jiraSummaryCache.addAll(m));
+                                }
+                              });
+                            }
+                          });
+                        },
+                        onPickTicket: () => _openIssuePickerDialog(
+                          originalKey: w.issueKey,
+                          currentKey: effectiveKey,
+                          title: 'Ticket für ${DateFormat('dd.MM.yyyy HH:mm').format(w.start)} ändern',
+                        ),
+                      ),
+                      // Insert Divider
+                      _HoverableInsertDivider(
+                        onInsert: () {
+                           // Insert after this log
+                           // Default start is this log's end
+                           _insertLog(idx + 1, w.end);
                         },
                       ),
-                      Expanded(child: Text(line, style: style)),
                     ],
                   );
                 }),
@@ -1316,6 +1555,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   String _hhmm(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  bool _isSameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
 
   Future<void> _openSettings(BuildContext context) async {
     final s = context.read<AppState>().settings;
@@ -2585,6 +2825,7 @@ class _HomePageState extends State<HomePage> {
       // Drafts direkt übernehmen, note NICHT mit Titeln anreichern
       setState(() {
         _drafts = allDrafts;
+        _originalDrafts = allDrafts.map((d) => d.copy()).toList();
       });
 
       if (allDrafts.isEmpty) {
@@ -2900,5 +3141,61 @@ class _HomePageState extends State<HomePage> {
         });
       }
     }
+  }
+}
+
+class _HoverableInsertDivider extends StatefulWidget {
+  final VoidCallback onInsert;
+
+  const _HoverableInsertDivider({required this.onInsert});
+
+  @override
+  State<_HoverableInsertDivider> createState() => _HoverableInsertDividerState();
+}
+
+class _HoverableInsertDividerState extends State<_HoverableInsertDivider> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onInsert,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          height: 24, // Slightly taller for easier hit
+          child: Row(
+            children: [
+              // Indent to align with Time column
+              // Status (16+8) + TicketButton (40) + TicketKey (100) + Spacing (8)
+              // 24 + 40 + 100 + 8 = 172 approx.
+              // Let's try 160 + 8 padding in tile
+              const SizedBox(width: 166), 
+              
+              AnimatedOpacity(
+                duration: const Duration(milliseconds: 150),
+                opacity: _hovering ? 1.0 : 0.0,
+                child: Container(
+                  height: 20,
+                  width: 20,
+                  decoration: BoxDecoration(
+                    color: _hovering ? Theme.of(context).primaryColor : Colors.grey.shade400,
+                    shape: BoxShape.circle,
+                    boxShadow: _hovering ? [
+                      BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 4, offset: const Offset(0, 2))
+                    ] : null,
+                  ),
+                  child: const Icon(Icons.add, color: Colors.white, size: 16),
+                ),
+              ),
+              const Expanded(child: Divider(height: 1, indent: 8, endIndent: 8)),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

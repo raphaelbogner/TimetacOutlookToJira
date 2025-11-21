@@ -32,6 +32,8 @@ class DraftLog {
 
   DeltaState deltaState;
 
+  bool isManuallyModified;
+
   Duration get duration => end.difference(start);
   bool get isDuplicate => deltaState == DeltaState.duplicate;
   bool get isOverlap => deltaState == DeltaState.overlap;
@@ -43,7 +45,17 @@ class DraftLog {
     required this.issueKey,
     required this.note,
     this.deltaState = DeltaState.newEntry,
+    this.isManuallyModified = false,
   });
+
+  DraftLog copy() => DraftLog(
+        start: start,
+        end: end,
+        issueKey: issueKey,
+        note: note,
+        deltaState: deltaState,
+        isManuallyModified: isManuallyModified,
+      );
 }
 
 /// Merged überlappende oder direkt aneinanderstoßende Intervalle (Union).
