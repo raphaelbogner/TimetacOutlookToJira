@@ -125,14 +125,13 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     }
 
-    if (_gitlabFieldsFilled) {
+    if (_gitlabFieldsFilled || settings.noGitlabAccount) {
       await validateGitlabCredentials();
     } else {
       _gitlabAuthOk = false;
       notifyListeners();
     }
   }
-
 
   Future<bool> validateJiraCredentials({bool requireTickets = true}) async {
     final credsOk = _jiraCredentialFieldsFilled;
@@ -179,6 +178,12 @@ class AppState extends ChangeNotifier {
   }
 
   Future<bool> validateGitlabCredentials() async {
+    if (settings.noGitlabAccount) {
+      _gitlabAuthOk = true;
+      notifyListeners();
+      return true;
+    }
+
     if (!_gitlabFieldsFilled) {
       _gitlabAuthOk = false;
       notifyListeners();
@@ -278,7 +283,7 @@ class AppState extends ChangeNotifier {
       settings.gitlabToken.trim().isNotEmpty &&
       settings.gitlabProjectIds.trim().isNotEmpty;
 
-  bool get isGitlabConfigured => _gitlabFieldsFilled && _gitlabAuthOk;
+  bool get isGitlabConfigured => settings.noGitlabAccount || (_gitlabFieldsFilled && _gitlabAuthOk);
 
   bool get isAllConfigured => isJiraConfigured && isTimetacConfigured && isGitlabConfigured;
 
@@ -548,6 +553,7 @@ class _HomePageState extends State<HomePage> {
   Map<String, String> _jiraSummaryCache = {};
   int _tabIndex = 0;
 
+  bool _shownGitlabWarning = false;
   final Map<String, String> _issueOverrides = {}; // draftKey -> newKey
   String _draftKey(DraftLog d) => '${d.start.millisecondsSinceEpoch}-${d.end.millisecondsSinceEpoch}-${d.issueKey}';
 
@@ -741,6 +747,35 @@ class _HomePageState extends State<HomePage> {
     final state = context.watch<AppState>();
     final locked = !state.isAllConfigured;
 
+    if (state.settings.noGitlabAccount && !_shownGitlabWarning) {
+      // Post-Frame callback to show dialog
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() => _shownGitlabWarning = true);
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Row(children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.orange),
+              SizedBox(width: 8),
+              Text('Kein GitLab Account'),
+            ]),
+            content: const Text(
+              'Du hast angegeben, keinen GitLab Account zu haben.\n\n'
+              'Die automatische Zuordnung von Jira-Tickets basierend auf deinen Commits '
+              'ist daher deaktiviert. Du musst die Tickets manuell zuordnen.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Verstanden'),
+              ),
+            ],
+          ),
+        );
+      });
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Timetac + Outlook → Jira Worklogs'),
@@ -748,7 +783,8 @@ class _HomePageState extends State<HomePage> {
         actions: [
           _statusPill(state.isJiraConfigured, 'Jira'),
           _statusPill(state.isTimetacConfigured, 'Timetac'),
-          _statusPill(state.isGitlabConfigured, 'GitLab'),
+          _statusPill(state.isGitlabConfigured, 'GitLab',
+              warn: state.settings.noGitlabAccount),
           const SizedBox(width: 24),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8.0),
@@ -812,9 +848,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   // kleine Statusanzeige (Icon + Label darunter)
-  Widget _statusPill(bool ok, String label) {
-    final color = ok ? Colors.green : Colors.red;
-    final icon = ok ? Icons.check_circle : Icons.cancel;
+  Widget _statusPill(bool ok, String label, {bool warn = false}) {
+    final color = warn ? Colors.orange : (ok ? Colors.green : Colors.red);
+    final icon = warn ? Icons.warning_amber_rounded : (ok ? Icons.check_circle : Icons.cancel);
 
     return Semantics(
       label: '$label ${ok ? "konfiguriert" : "fehlt"}',
@@ -1596,6 +1632,7 @@ class _HomePageState extends State<HomePage> {
     final glTokCtl = TextEditingController(text: s.gitlabToken);
     final glProjCtl = TextEditingController(text: s.gitlabProjectIds);
     final glMailCtl = TextEditingController(text: s.gitlabAuthorEmail);
+    bool noGitlab = s.noGitlabAccount;
 
     // Non-Meeting-Hints: Defaults + aktiver Zustand + Custom-Controller
     const defaultsNonMeeting = SettingsModel.defaultNonMeetingHintsList;
@@ -1650,14 +1687,15 @@ class _HomePageState extends State<HomePage> {
               bool jiraOk() => context.read<AppState>().isJiraConfigured;
               bool timetacOk() => context.read<AppState>().isTimetacConfigured;
               bool gitlabOk() => context.read<AppState>().isGitlabConfigured;
+              bool noGitlabAcc() => context.read<AppState>().settings.noGitlabAccount;
 
               bool jiraTesting = false;
               bool gitlabTesting = false;
 
-              Widget settingsIcon(bool ok) => Icon(
-                    ok ? Icons.check_circle : Icons.cancel,
+              Widget settingsIcon(bool ok, {bool warn = false}) => Icon(
+                    warn ? Icons.warning_amber_rounded : (ok ? Icons.check_circle : Icons.cancel),
                     size: 18,
-                    color: ok ? Colors.green : Colors.red,
+                    color: warn ? Colors.orange : (ok ? Colors.green : Colors.red),
                   );
 
               Widget sectionTitle(BuildContext ctx, String t) => Align(
@@ -1728,7 +1766,7 @@ class _HomePageState extends State<HomePage> {
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  settingsIcon(gitlabOk()),
+                                  settingsIcon(gitlabOk(), warn: noGitlabAcc()),
                                   const SizedBox(width: 6),
                                   const Text('GitLab'),
                                 ],
@@ -2265,113 +2303,130 @@ class _HomePageState extends State<HomePage> {
                                     spacing: 8,
                                     children: [
                                       sectionTitle(ctx, 'GitLab (für Arbeitszeit Ticket-Automatik)'),
-                                      TextFormField(
-                                        decoration: const InputDecoration(
-                                            labelText: 'GitLab Base URL (https://gitlab.example.com)'),
-                                        controller: glBaseCtl,
-                                        onChanged: (_) => markRebuild(setDlg),
+                                      SwitchListTile(
+                                        title: const Text('Ich habe keinen GitLab Account'),
+                                        subtitle: const Text(
+                                            'Deaktiviert die Commit-Suche. App wird nicht gesperrt.'),
+                                        value: noGitlab,
+                                        onChanged: (v) {
+                                          noGitlab = v;
+                                          markRebuild(setDlg);
+                                        },
                                       ),
-                                      TextFormField(
-                                        decoration: const InputDecoration(labelText: 'GitLab Author E-Mail'),
-                                        controller: glMailCtl,
-                                        onChanged: (_) => markRebuild(setDlg),
-                                      ),
-                                      TextFormField(
-                                        decoration: const InputDecoration(
-                                            labelText: 'GitLab Projekt-IDs (Komma/Leerzeichen getrennt)'),
-                                        controller: glProjCtl,
-                                        onChanged: (_) => markRebuild(setDlg),
-                                      ),
-                                      Align(
-                                        alignment: Alignment.centerLeft,
-                                        child: TextButton.icon(
-                                          icon: const Icon(Icons.open_in_new),
-                                          label: const Text(
-                                              'Gitlab-Übersicht der Projekte öffnen (Auf ein Projekt klicken und dann über die drei Punkte oben rechts die ID kopieren)'),
-                                          onPressed: () async {
-                                            if (glBaseCtl.text.isNotEmpty) {
-                                              var url = glBaseCtl.text.trim();
-                                              if (url.endsWith('/')) url = url.substring(0, url.length - 1);
-                                              url = '$url/dashboard/projects';
-                                              final uri = Uri.parse(url);
-                                              if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-                                                _showErrorDialog(
-                                                  'Link konnte nicht geöffnet werden',
-                                                  'Es wurde versucht "$url" zu öffnen',
-                                                );
-                                              }
-                                            } else {
-                                              _showErrorDialog(
-                                                'Link konnte nicht geöffnet werden',
-                                                'URL-Feld muss ausgefüllt sein.',
-                                              );
-                                            }
-                                          },
+                                      if (!noGitlab) ...[
+                                        TextFormField(
+                                          decoration: const InputDecoration(
+                                              labelText: 'GitLab Base URL (https://gitlab.example.com)'),
+                                          controller: glBaseCtl,
+                                          onChanged: (_) => markRebuild(setDlg),
                                         ),
-                                      ),
-                                      TextFormField(
-                                        decoration: const InputDecoration(labelText: 'GitLab PRIVATE-TOKEN'),
-                                        controller: glTokCtl,
-                                        obscureText: true,
-                                        onChanged: (_) => markRebuild(setDlg),
-                                      ),
-                                      Align(
-                                        alignment: Alignment.centerLeft,
-                                        child: TextButton.icon(
-                                          icon: const Icon(Icons.open_in_new),
-                                          label: const Text(
-                                            'Gitlab-Seite zum Erstellen/Verwalten des API-Tokens öffnen (NUR READ-API SETZEN)',
-                                          ),
-                                          onPressed: () async {
-                                            if (glBaseCtl.text.isNotEmpty) {
-                                              var url = glBaseCtl.text.trim();
-                                              if (url.endsWith('/')) url = url.substring(0, url.length - 1);
-                                              url = '$url/-/user_settings/personal_access_tokens';
-                                              final uri = Uri.parse(url);
-                                              if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-                                                _showErrorDialog(
-                                                  'Link konnte nicht geöffnet werden',
-                                                  'Es wurde versucht "$url" zu öffnen',
-                                                );
-                                              }
-                                            } else {
-                                              _showErrorDialog(
-                                                'Link konnte nicht geöffnet werden',
-                                                'URL-Feld muss ausgefüllt sein.',
-                                              );
-                                            }
-                                          },
+                                        TextFormField(
+                                          decoration: const InputDecoration(labelText: 'GitLab Author E-Mail'),
+                                          controller: glMailCtl,
+                                          onChanged: (_) => markRebuild(setDlg),
                                         ),
-                                      ),
-                                      sectionTitle(ctx, 'Verbindung'),
-                                      Row(
-                                        children: [
-                                          OutlinedButton.icon(
+                                        TextFormField(
+                                          decoration: const InputDecoration(
+                                              labelText: 'GitLab Projekt-IDs (Komma/Leerzeichen getrennt)'),
+                                          controller: glProjCtl,
+                                          onChanged: (_) => markRebuild(setDlg),
+                                        ),
+                                        Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: TextButton.icon(
+                                            icon: const Icon(Icons.open_in_new),
+                                            label: const Text(
+                                                'Gitlab-Übersicht der Projekte öffnen (Auf ein Projekt klicken und dann über die drei Punkte oben rechts die ID kopieren)'),
                                             onPressed: () async {
-                                              final st = context.read<AppState>().settings;
-                                              st.gitlabBaseUrl = glBaseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
-                                              st.gitlabToken = glTokCtl.text.trim();
-                                              st.gitlabProjectIds = glProjCtl.text.trim();
-                                              st.gitlabAuthorEmail = glMailCtl.text.trim();
-                                              await context.read<AppState>().savePrefs();
-
-                                              if (context.mounted) {
-                                                context.read<AppState>().markGitlabUnknown();
-                                                setDlg(() => gitlabTesting = true);
-                                                final ok = await context.read<AppState>().validateGitlabCredentials();
-                                                setDlg(() => gitlabTesting = false);
-
-                                                _showInfoDialog(
-                                                  'Gitlab-Verbindung',
-                                                  ok
-                                                      ? 'GitLab-Verbindung erfolgreich'
-                                                      : 'GitLab-Verbindung fehlgeschlagen',
+                                              if (glBaseCtl.text.isNotEmpty) {
+                                                var url = glBaseCtl.text.trim();
+                                                if (url.endsWith('/')) url = url.substring(0, url.length - 1);
+                                                url = '$url/dashboard/projects';
+                                                final uri = Uri.parse(url);
+                                                if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+                                                  _showErrorDialog(
+                                                    'Link konnte nicht geöffnet werden',
+                                                    'Es wurde versucht "$url" zu öffnen',
+                                                  );
+                                                }
+                                              } else {
+                                                _showErrorDialog(
+                                                  'Link konnte nicht geöffnet werden',
+                                                  'URL-Feld muss ausgefüllt sein.',
                                                 );
                                               }
                                             },
-                                            icon: const Icon(Icons.link),
-                                            label: const Text('Verbindung testen'),
                                           ),
+                                        ),
+                                        TextFormField(
+                                          decoration: const InputDecoration(labelText: 'GitLab PRIVATE-TOKEN'),
+                                          controller: glTokCtl,
+                                          obscureText: true,
+                                          onChanged: (_) => markRebuild(setDlg),
+                                        ),
+                                        Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: TextButton.icon(
+                                            icon: const Icon(Icons.open_in_new),
+                                            label: const Text(
+                                              'Gitlab-Seite zum Erstellen/Verwalten des API-Tokens öffnen (NUR READ-API SETZEN)',
+                                            ),
+                                            onPressed: () async {
+                                              if (glBaseCtl.text.isNotEmpty) {
+                                                var url = glBaseCtl.text.trim();
+                                                if (url.endsWith('/')) url = url.substring(0, url.length - 1);
+                                                url = '$url/-/user_settings/personal_access_tokens';
+                                                final uri = Uri.parse(url);
+                                                if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+                                                  _showErrorDialog(
+                                                    'Link konnte nicht geöffnet werden',
+                                                    'Es wurde versucht "$url" zu öffnen',
+                                                  );
+                                                }
+                                              } else {
+                                                _showErrorDialog(
+                                                  'Link konnte nicht geöffnet werden',
+                                                  'URL-Feld muss ausgefüllt sein.',
+                                                );
+                                              }
+                                            },
+                                          ),
+                                        ),
+                                      ],
+                                      if (!noGitlab)
+                                      sectionTitle(ctx, 'Verbindung'),
+                                      if (!noGitlab)
+                                      Row(
+                                        children: [
+                                            OutlinedButton.icon(
+                                              onPressed: () async {
+                                                final st = context.read<AppState>().settings;
+                                                // Nur GitLab-Felder speichern für den Test
+                                                st.gitlabBaseUrl = glBaseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
+                                                st.gitlabToken = glTokCtl.text.trim();
+                                                st.gitlabProjectIds = glProjCtl.text.trim();
+                                                st.gitlabAuthorEmail = glMailCtl.text.trim();
+                                                st.noGitlabAccount = false; // Ensure we actually test
+                                                
+                                                await context.read<AppState>().savePrefs();
+                                                
+                                                if (context.mounted) {
+                                                  context.read<AppState>().markGitlabUnknown();
+                                                  setDlg(() => gitlabTesting = true);
+                                                  final ok = await context.read<AppState>().validateGitlabCredentials();
+                                                  setDlg(() => gitlabTesting = false);
+
+                                                  _showInfoDialog(
+                                                    'Gitlab-Verbindung',
+                                                    ok
+                                                        ? 'GitLab-Verbindung erfolgreich'
+                                                        : 'GitLab-Verbindung fehlgeschlagen',
+                                                  );
+                                                }
+                                              },
+                                              icon: const Icon(Icons.link),
+                                              label: const Text('Verbindung testen'),
+                                            ),
                                           const SizedBox(width: 12),
                                           Builder(
                                             builder: (_) {
@@ -2567,6 +2622,7 @@ class _HomePageState extends State<HomePage> {
                                 st.gitlabToken = glTokCtl.text.trim();
                                 st.gitlabProjectIds = glProjCtl.text.trim();
                                 st.gitlabAuthorEmail = glMailCtl.text.trim();
+                                st.noGitlabAccount = noGitlab;
 
                                 // Meeting-Regeln übernehmen
                                 final newMeetingRules = <MeetingRule>[];
@@ -2730,7 +2786,7 @@ class _HomePageState extends State<HomePage> {
       List<_CT> ordered = [];
       state.gitlabCommits = [];
 
-      if (s.gitlabBaseUrl.isNotEmpty && s.gitlabToken.isNotEmpty && s.gitlabProjectIds.isNotEmpty) {
+      if (!s.noGitlabAccount && s.gitlabBaseUrl.isNotEmpty && s.gitlabToken.isNotEmpty && s.gitlabProjectIds.isNotEmpty) {
         final api = GitlabApi(baseUrl: s.gitlabBaseUrl, token: s.gitlabToken);
         final ids =
             s.gitlabProjectIds.split(RegExp(r'[,\s]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
@@ -2820,13 +2876,13 @@ class _HomePageState extends State<HomePage> {
               final s1 = e.start.isAfter(w.start) ? e.start : w.start;
               final e1 = e.end.isBefore(w.end) ? e.end : w.end;
               if (e1.isAfter(s1)) {
-                final titleSuffix = titleText.isEmpty ? '' : ' – $titleText';
+                final titleSuffix = titleText.isEmpty ? '' : '– $titleText';
                 meetingDrafts.add(
                   DraftLog(
                     start: s1,
                     end: e1,
                     issueKey: issueKeyForMeeting,
-                    note: 'Meeting ${DateFormat('HH:mm').format(s1)}–${DateFormat('HH:mm').format(e1)}$titleSuffix',
+                    note: 'Meeting $titleSuffix',
                   ),
                 );
               }
@@ -2853,14 +2909,38 @@ class _HomePageState extends State<HomePage> {
         final trimmedRest = _trimPiecesFromEndBy(doctor, restPieces);
 
         // Rest auf Tickets verteilen
-        final restDrafts = ordered.isEmpty
-            ? <DraftLog>[]
-            : _assignRestPiecesByCommits(
-                pieces: trimmedRest,
-                ordered: ordered,
+        final restDrafts = <DraftLog>[];
+
+        if (trimmedRest.isEmpty) {
+          // nichts mehr übrig
+        } else if (!state.settings.noGitlabAccount && ordered.isNotEmpty) {
+          // GitLab aktiv und Commits vorhanden → wie bisher über Commits routen
+          restDrafts.addAll(
+            _assignRestPiecesByCommits(
+              pieces: trimmedRest,
+              ordered: ordered,
+              note: 'Arbeit',
+              log: (s) => _log += s,
+            ),
+          );
+        } else {
+          // KEIN GitLab (noGitlabAccount == true) ODER keine Commits → alles aufs Fallback-Ticket buchen
+          final fallbackKey = state.settings.fallbackIssueKey;
+
+          for (final piece in trimmedRest) {
+            restDrafts.add(
+              DraftLog(
+                start: piece.start,
+                end: piece.end,
+                issueKey: fallbackKey,
                 note: 'Arbeit',
-                log: (s) => _log += s,
-              );
+              ),
+            );
+          }
+
+          _log += 'Restarbeit ohne GitLab-Commits: '
+              '${restDrafts.length} Worklog(s) auf $fallbackKey.\n';
+        }
 
         // Drafts des Tages zusammenführen
         final dayDrafts = <DraftLog>[
@@ -2904,6 +2984,16 @@ class _HomePageState extends State<HomePage> {
         _log += 'Jira Summaries geholt: ${summaries.length}/${needSummaries.length}\n';
       }
       _jiraSummaryCache = summaries;
+
+      // Notes für Arbeits-Blöcke (GitLab-basiert) mit Ticket-Titel ersetzen
+    for (final d in allDrafts) {
+      if (d.note == 'Arbeit') {
+        final sum = summaries[d.issueKey];
+        if (sum != null && sum.isNotEmpty) {
+          d.note = 'Arbeit – $sum';
+        }
+      }
+    }
 
       await state.applyDeltaModeToDrafts(allDrafts);
 

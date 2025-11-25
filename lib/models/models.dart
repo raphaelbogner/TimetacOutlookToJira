@@ -30,6 +30,7 @@ class SettingsModel {
   String gitlabProjectIds; // Komma-/Leerzeichen-getrennt: "123, 456"
   String gitlabAuthorEmail; // optional: nur Commits dieser Mail
   int gitlabLookbackDays; // Lookback in Tagen, um „letztes Ticket“ vor dem Zeitraum zu finden
+  bool noGitlabAccount; // Toggle: Kein GitLab Account vorhanden
 
   // non meeting hints
   String nonMeetingHintsMultiline;
@@ -97,6 +98,7 @@ class SettingsModel {
     this.gitlabProjectIds = '',
     this.gitlabAuthorEmail = '',
     this.gitlabLookbackDays = 30,
+    this.noGitlabAccount = false,
     this.meetingRules = const [],
     String? nonMeetingHintsMultiline,
   }) : nonMeetingHintsMultiline = nonMeetingHintsMultiline ?? defaultNonMeetingHintsMultiline;
@@ -138,6 +140,7 @@ class SettingsModel {
         'gitlabProjectIds': gitlabProjectIds,
         'gitlabAuthorEmail': gitlabAuthorEmail,
         'gitlabLookbackDays': gitlabLookbackDays,
+        'noGitlabAccount': noGitlabAccount,
         'nonMeetingHintsMultiline': nonMeetingHintsMultiline,
         'meetingRules': meetingRules.map((r) => r.toJson()).toList(),
       };
@@ -169,6 +172,7 @@ class SettingsModel {
         gitlabLookbackDays: (m['gitlabLookbackDays'] ?? 30) is int
             ? m['gitlabLookbackDays'] as int
             : int.tryParse((m['gitlabLookbackDays'] ?? '30').toString()) ?? 30,
+        noGitlabAccount: (m['noGitlabAccount'] ?? false) as bool,
         nonMeetingHintsMultiline: (m['nonMeetingHintsMultiline'] ?? defaultNonMeetingHintsMultiline) as String,
         meetingRules: ((m['meetingRules'] as List?) ?? const [])
             .map((e) => MeetingRule.fromJson(e as Map<String, dynamic>))
