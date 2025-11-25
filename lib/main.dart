@@ -2958,7 +2958,7 @@ class _HomePageState extends State<HomePage> {
           return d;
         }).toList();
 
-        allDrafts.addAll(withOverrides);
+        allDrafts.addAll(withOverrides.where((d) => d.duration.inMinutes >= 1));
 
         // Logging Tageszusammenfassung
         final meetingDur = meetingDrafts.fold<Duration>(Duration.zero, (p, d) => p + d.duration);
