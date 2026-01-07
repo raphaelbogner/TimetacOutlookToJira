@@ -18,6 +18,7 @@ import 'services/gitlab_api.dart';
 import 'services/ics_parser.dart';
 import 'services/jira_api.dart';
 import 'services/jira_worklog_api.dart';
+import 'ui/delete_mode_screen.dart';
 import 'ui/preview_utils.dart';
 import 'widgets/preview_table.dart';
 import 'widgets/draft_log_tile.dart';
@@ -559,7 +560,7 @@ class _HomePageState extends State<HomePage> {
   List<DraftLog> _drafts = [];
   List<DraftLog> _originalDrafts = []; // Backup for reset
   Map<String, String> _jiraSummaryCache = {};
-  int _tabIndex = 0;
+  int _tabIndex = 1;
 
   bool _shownGitlabWarning = false;
   final Map<String, String> _issueOverrides = {}; // draftKey -> newKey
@@ -718,7 +719,8 @@ class _HomePageState extends State<HomePage> {
   Widget _switchedSection(BuildContext context) {
     final state = context.watch<AppState>();
 
-    if (_tabIndex == 0) {
+    // Index 0 is Tools, so shift others by 1
+    if (_tabIndex == 1) {
       // Preview
       if (state.totals.isEmpty) {
         return const Padding(
@@ -729,7 +731,7 @@ class _HomePageState extends State<HomePage> {
       return PreviewTable(days: state.totals);
     }
 
-    if (_tabIndex == 1) {
+    if (_tabIndex == 2) {
       // Geplante Worklogs
       if (_drafts.isEmpty) {
         return const Padding(
@@ -740,7 +742,7 @@ class _HomePageState extends State<HomePage> {
       return _plannedList(context, _drafts);
     }
 
-    // Logs
+    // Logs (_tabIndex == 3)
     if (_log.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(12.0),
@@ -816,9 +818,14 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(
+        type: BottomNavigationBarType.fixed,
         currentIndex: _tabIndex,
         onTap: (i) => setState(() => _tabIndex = i),
         items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.delete_sweep),
+            label: 'Löschen',
+          ),
           BottomNavigationBarItem(
             icon: Icon(Icons.table_chart),
             label: 'Vorschau',
@@ -834,19 +841,21 @@ class _HomePageState extends State<HomePage> {
         children: [
           AbsorbPointer(
             absorbing: locked || _busy,
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                spacing: 12,
-                children: [
-                  _buildImportButtons(context),
-                  _buildRangePicker(context),
-                  _buildCalculateButtons(context),
-                  _switchedSection(context),
-                ],
-              ),
-            ),
+            child: _tabIndex == 0
+                ? const DeleteModeScreen()
+                : SingleChildScrollView(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      spacing: 12,
+                      children: [
+                        _buildImportButtons(context),
+                        _buildRangePicker(context),
+                        _buildCalculateButtons(context),
+                        _switchedSection(context),
+                      ],
+                    ),
+                  ),
           ),
           if (locked) _lockOverlay(context, state),
           if (_busy) _busyOverlay(context),

@@ -127,6 +127,28 @@ class JiraWorklogApi {
     }
   }
 
+  Future<bool> deleteWorklog({
+    required String issueKeyOrId,
+    required String worklogId,
+  }) async {
+    final uri = Uri.parse('$_base/rest/api/3/issue/${Uri.encodeComponent(issueKeyOrId)}/worklog/${Uri.encodeComponent(worklogId)}');
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final req = await client.deleteUrl(uri);
+      req.headers.set(HttpHeaders.authorizationHeader, _auth);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+
+      final resp = await req.close().timeout(const Duration(seconds: 30));
+      // 204 No Content ist normal bei Delete
+      return resp.statusCode >= 200 && resp.statusCode < 300;
+    } catch (e) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<List<JiraWorklog>> fetchWorklogsForIssue({
     required String issueKeyOrId,
   }) async {

@@ -78,6 +78,38 @@ class JiraApi {
     }
   }
 
+  /// Führt eine rohe JQL-Query aus und gibt eine Liste von Issue-Keys zurück
+  Future<List<String>> searchJql(String jql, {int maxResults = 100}) async {
+    if (baseUrl.isEmpty || email.isEmpty || apiToken.isEmpty) return const [];
+
+    final uri = Uri.parse(
+      '$_base/rest/api/3/search/jql?jql=${Uri.encodeQueryComponent(jql)}&fields=key&maxResults=$maxResults',
+    );
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final req = await client.getUrl(uri);
+      req.headers.set(HttpHeaders.authorizationHeader, _auth);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final resp = await req.close().timeout(const Duration(seconds: 30));
+      
+      if (resp.statusCode < 200 || resp.statusCode >= 300) return const [];
+
+      final body = await utf8.decodeStream(resp);
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      final issues = (json['issues'] as List?) ?? const [];
+      
+      return issues.map((it) {
+        final m = it as Map<String, dynamic>;
+        return (m['key'] ?? '').toString();
+      }).where((k) => k.isNotEmpty).toList();
+    } catch (_) {
+      return const [];
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   // Optional: Keys → Summaries (ersetzt deinen Batch in main.dart)
   Future<Map<String, String>> fetchSummariesByKeys(Set<String> keys, {int batchSize = 50}) async {
     if (baseUrl.isEmpty || email.isEmpty || apiToken.isEmpty || keys.isEmpty) return {};
