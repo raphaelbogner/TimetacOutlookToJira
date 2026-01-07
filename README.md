@@ -1,4 +1,4 @@
-# Timetac + Outlook → Jira Worklogs
+# CHRONOS
 
 Ein kompaktes Flutter-Tool, das **Arbeitszeiten aus Timetac (CSV)** mit **Outlook-Terminen (.ics)** und **GitLab-Commits** zusammenführt und daraus **Jira-Worklogs** erzeugt – exakt gesplittet nach Meetings, Pausen, Arztterminen und optional per Commit erkannten Tickets.
 

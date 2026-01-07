@@ -48,7 +48,7 @@ class MyApp extends StatelessWidget {
             useMaterial3: true,
           );
           return MaterialApp(
-            title: 'Timetac + Outlook → Jira Worklogs',
+            title: 'Chronos',
             theme: light,
             darkTheme: dark,
             themeMode: app.themeMode,
@@ -788,7 +788,7 @@ class _HomePageState extends State<HomePage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Timetac + Outlook → Jira Worklogs'),
+        title: const Text('Chronos'),
         actionsPadding: const EdgeInsets.only(right: 12.0),
         actions: [
           _statusPill(state.isJiraConfigured, 'Jira'),
