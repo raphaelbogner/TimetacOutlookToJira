@@ -1157,10 +1157,10 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  void _insertLog(int indexAfter, DateTime start) {
+  void _insertLog(int indexAfter, DateTime start, {bool isPause = false}) {
     setState(() {
       // Default duration 5 mins
-      var end = start.add(const Duration(minutes: 5));
+      var end = start.add(Duration(minutes: isPause ? 15 : 5));
       
       // Smart Insert: Shift next log if overlap
       if (indexAfter < _drafts.length) {
@@ -1181,10 +1181,11 @@ class _HomePageState extends State<HomePage> {
       final newLog = DraftLog(
         start: start,
         end: end,
-        issueKey: context.read<AppState>().settings.fallbackIssueKey,
-        note: '',
+        issueKey: isPause ? '' : context.read<AppState>().settings.fallbackIssueKey,
+        note: isPause ? 'Pause' : '',
         deltaState: DeltaState.newEntry,
         isManuallyModified: true,
+        isPause: isPause,
       );
       
       _drafts.insert(indexAfter, newLog);
@@ -1315,11 +1316,15 @@ class _HomePageState extends State<HomePage> {
                       // Insert Divider BEFORE first log of day
                       if (w == byDay[day]!.first)
                         _HoverableInsertDivider(
-                          onInsert: () {
+                          onInsertWorklog: () {
                              // Insert before this log
                              // Start = w.start - 5min
                              final start = w.start.subtract(const Duration(minutes: 5));
                              _insertLog(idx, start);
+                          },
+                          onInsertPause: () {
+                             final start = w.start.subtract(const Duration(minutes: 15));
+                             _insertLog(idx, start, isPause: true);
                           },
                         ),
 
@@ -1356,10 +1361,13 @@ class _HomePageState extends State<HomePage> {
                       ),
                       // Insert Divider
                       _HoverableInsertDivider(
-                        onInsert: () {
+                        onInsertWorklog: () {
                            // Insert after this log
                            // Default start is this log's end
                            _insertLog(idx + 1, w.end);
+                        },
+                        onInsertPause: () {
+                           _insertLog(idx + 1, w.end, isPause: true);
                         },
                       ),
                     ],
@@ -2987,10 +2995,25 @@ class _HomePageState extends State<HomePage> {
               '${restDrafts.length} Worklog(s) auf $fallbackKey.\n';
         }
 
+        // Pausen als DraftLogs für die Anzeige (werden nicht gebucht)
+        final pauseDrafts = <DraftLog>[];
+        for (final row in rowsForDay) {
+          for (final pr in row.pauses) {
+            pauseDrafts.add(DraftLog(
+              start: pr.start,
+              end: pr.end,
+              issueKey: '',
+              note: 'Pause',
+              isPause: true,
+            ));
+          }
+        }
+
         // Drafts des Tages zusammenführen
         final dayDrafts = <DraftLog>[
           ...meetingDrafts,
           ...restDrafts,
+          ...pauseDrafts,
         ]..sort((a, b) => a.start.compareTo(b.start));
 
         // Ticket-Overrides anwenden, falls gesetzt
@@ -3019,8 +3042,10 @@ class _HomePageState extends State<HomePage> {
 
       // -------- Summaries laden (nur für Anzeige) --------
       final overrideKeys = _issueOverrides.values.where((e) => e.trim().isNotEmpty).toSet();
-      final nonMeetingKeys =
-          allDrafts.where((d) => d.issueKey != state.settings.meetingIssueKey).map((d) => d.issueKey).toSet();
+      final nonMeetingKeys = allDrafts
+          .where((d) => !d.isPause && d.issueKey.isNotEmpty && d.issueKey != state.settings.meetingIssueKey)
+          .map((d) => d.issueKey)
+          .toSet();
 
       final needSummaries = {...nonMeetingKeys, ...overrideKeys};
       Map<String, String> summaries = {};
@@ -3245,6 +3270,9 @@ class _HomePageState extends State<HomePage> {
       final draftsToSend = <DraftLog>[];
 
       for (final d in _drafts) {
+        // Pausen niemals buchen
+        if (d.isPause) continue;
+        
         final isDeltaProtected =
             state.deltaModeEnabled && (d.deltaState == DeltaState.duplicate || d.deltaState == DeltaState.overlap);
 
@@ -3428,9 +3456,13 @@ class _HomePageState extends State<HomePage> {
 }
 
 class _HoverableInsertDivider extends StatefulWidget {
-  final VoidCallback onInsert;
+  final VoidCallback onInsertWorklog;
+  final VoidCallback onInsertPause;
 
-  const _HoverableInsertDivider({required this.onInsert});
+  const _HoverableInsertDivider({
+    required this.onInsertWorklog,
+    required this.onInsertPause,
+  });
 
   @override
   State<_HoverableInsertDivider> createState() => _HoverableInsertDividerState();
@@ -3439,6 +3471,40 @@ class _HoverableInsertDivider extends StatefulWidget {
 class _HoverableInsertDividerState extends State<_HoverableInsertDivider> {
   bool _hovering = false;
 
+  void _showMenu(BuildContext context, Offset position) {
+    showMenu(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        position.dx + 1,
+        position.dy + 1,
+      ),
+      items: [
+        PopupMenuItem(
+          onTap: widget.onInsertWorklog,
+          child: const Row(
+            children: [
+              Icon(Icons.work_outline, size: 18),
+              SizedBox(width: 8),
+              Text('Worklog einfügen'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          onTap: widget.onInsertPause,
+          child: const Row(
+            children: [
+              Icon(Icons.pause_circle_outline, size: 18),
+              SizedBox(width: 8),
+              Text('Pause einfügen'),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return MouseRegion(
@@ -3446,7 +3512,7 @@ class _HoverableInsertDividerState extends State<_HoverableInsertDivider> {
       onExit: (_) => setState(() => _hovering = false),
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
-        onTap: widget.onInsert,
+        onTapUp: (details) => _showMenu(context, details.globalPosition),
         behavior: HitTestBehavior.opaque,
         child: Container(
           height: 24, // Slightly taller for easier hit

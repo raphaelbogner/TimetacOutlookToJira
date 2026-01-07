@@ -132,48 +132,58 @@ class _DraftLogTileState extends State<DraftLogTile> {
   Widget build(BuildContext context) {
     final d = widget.draft;
     
-    // Color logic from main.dart
+    // Color logic - Pausen sind immer grau/gedimmt
     Color? statusColor;
-    if (d.isDuplicate) statusColor = Colors.grey;
-    if (d.isOverlap) statusColor = Colors.orange;
+    if (d.isPause) {
+      statusColor = Colors.grey.shade500;
+    } else if (d.isDuplicate) {
+      statusColor = Colors.grey;
+    } else if (d.isOverlap) {
+      statusColor = Colors.orange;
+    }
 
     return GestureDetector(
       onSecondaryTapUp: (details) {
-        _showContextMenu(context, details.globalPosition);
+        if (!d.isPause) _showContextMenu(context, details.globalPosition);
       },
       child: Container(
-        color: Colors.transparent, // hit test
+        color: d.isPause ? Colors.grey.shade100.withAlpha(80) : Colors.transparent,
         padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
         child: Row(
           children: [
             // Status Icon
-            if (d.isManuallyModified) const Tooltip(message: 'Manuell bearbeitet', child: Icon(Icons.edit, size: 16, color: Colors.blue))
+            if (d.isPause) const Tooltip(message: 'Pause (wird nicht gebucht)', child: Icon(Icons.pause_circle_outline, size: 16, color: Colors.grey))
+            else if (d.isManuallyModified) const Tooltip(message: 'Manuell bearbeitet', child: Icon(Icons.edit, size: 16, color: Colors.blue))
             else if (d.isNew) const Icon(Icons.fiber_new, size: 16, color: Colors.green)
             else if (d.isDuplicate) const Icon(Icons.check_circle, size: 16, color: Colors.grey)
             else if (d.isOverlap) const Icon(Icons.warning_amber_rounded, size: 16, color: Colors.orange),
             
             const SizedBox(width: 8),
 
-            // Ticket
-            IconButton(
-              icon: const Icon(Icons.swap_horiz, size: 20),
-              tooltip: 'Ticket ändern',
-              onPressed: () async {
-                final newKey = await widget.onPickTicket();
-                if (newKey != null && newKey.isNotEmpty) {
-                  widget.onTicketChanged(newKey);
-                }
-              },
-            ),
+            // Ticket (nur für normale Worklogs)
+            if (d.isPause)
+              const SizedBox(width: 48) // Platzhalter für den Button
+            else
+              IconButton(
+                icon: const Icon(Icons.swap_horiz, size: 20),
+                tooltip: 'Ticket ändern',
+                onPressed: () async {
+                  final newKey = await widget.onPickTicket();
+                  if (newKey != null && newKey.isNotEmpty) {
+                    widget.onTicketChanged(newKey);
+                  }
+                },
+              ),
             
-            // Ticket Key Display
+            // Ticket Key Display oder "Pause"
             SizedBox(
               width: widget.ticketWidth ?? 100,
               child: Text(
-                d.issueKey,
+                d.isPause ? '— Pause —' : d.issueKey,
                 style: TextStyle(
                   fontFamily: 'monospace',
-                  fontWeight: FontWeight.bold,
+                  fontWeight: d.isPause ? FontWeight.normal : FontWeight.bold,
+                  fontStyle: d.isPause ? FontStyle.italic : FontStyle.normal,
                   color: statusColor,
                 ),
               ),

@@ -33,6 +33,7 @@ class DraftLog {
   DeltaState deltaState;
 
   bool isManuallyModified;
+  bool isPause; // Markiert Pausen-Einträge (werden nicht gebucht)
 
   Duration get duration => end.difference(start);
   bool get isDuplicate => deltaState == DeltaState.duplicate;
@@ -46,6 +47,7 @@ class DraftLog {
     required this.note,
     this.deltaState = DeltaState.newEntry,
     this.isManuallyModified = false,
+    this.isPause = false,
   });
 
   DraftLog copy() => DraftLog(
@@ -55,6 +57,7 @@ class DraftLog {
         note: note,
         deltaState: deltaState,
         isManuallyModified: isManuallyModified,
+        isPause: isPause,
       );
 }
 
