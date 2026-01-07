@@ -14,6 +14,7 @@ class DraftLogTile extends StatefulWidget {
   final Function(DateTime start, DateTime end) onTimeChanged;
   final VoidCallback onDelete;
   final Future<String?> Function() onPickTicket;
+  final double? ticketWidth;
 
   const DraftLogTile({
     super.key,
@@ -27,6 +28,7 @@ class DraftLogTile extends StatefulWidget {
     required this.onTimeChanged,
     required this.onDelete,
     required this.onPickTicket,
+    this.ticketWidth,
   });
 
   @override
@@ -166,7 +168,7 @@ class _DraftLogTileState extends State<DraftLogTile> {
             
             // Ticket Key Display
             SizedBox(
-              width: 100,
+              width: widget.ticketWidth ?? 100,
               child: Text(
                 d.issueKey,
                 style: TextStyle(

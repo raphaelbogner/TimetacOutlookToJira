@@ -1222,9 +1222,19 @@ class _HomePageState extends State<HomePage> {
       final key = DateFormat('dd.MM.yyyy').format(d.start);
       (byDay[key] ??= []).add(d);
     }
-    final dayKeys = byDay.keys.toList()..sort();
+    final dayKeys = byDay.keys.toList()
+      ..sort((a, b) {
+        final dateA = DateFormat('dd.MM.yyyy').parse(a);
+        final dateB = DateFormat('dd.MM.yyyy').parse(b);
+        return dateA.compareTo(dateB);
+      });
 
     final meetingKey = context.read<AppState>().settings.meetingIssueKey;
+
+    // Berechne maximale Ticket-Breite basierend auf der längsten Ticket-Nummer
+    final maxTicketLength = drafts.fold<int>(0, (max, d) => d.issueKey.length > max ? d.issueKey.length : max);
+    // Monospace-Schrift: ca. 8.5px pro Zeichen + etwas Puffer
+    final ticketWidth = (maxTicketLength * 8.5 + 12).clamp(80.0, 200.0);
 
     return Card(
       child: Padding(
@@ -1245,21 +1255,40 @@ class _HomePageState extends State<HomePage> {
           _deltaLegend(),
           const SizedBox(height: 16),
           for (final day in dayKeys) ...[
-            Row(
-              children: [
-                Text(day, style: Theme.of(context).textTheme.titleSmall),
-                const SizedBox(width: 8),
-                TextButton.icon(
-                  onPressed: () => _resetDay(day),
-                  icon: const Icon(Icons.restore, size: 16),
-                  label: const Text('Zeitänderungen zurücksetzen'),
-                  style: TextButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
+            Builder(builder: (context) {
+              final dayLogs = byDay[day]!;
+              final totalDuration = dayLogs.fold<Duration>(
+                Duration.zero,
+                (sum, log) => sum + log.duration,
+              );
+              final hours = totalDuration.inHours;
+              final minutes = totalDuration.inMinutes.remainder(60);
+              final totalStr = '${hours}h ${minutes.toString().padLeft(2, '0')}m';
+              
+              return Row(
+                children: [
+                  Text(day, style: Theme.of(context).textTheme.titleSmall),
+                  const SizedBox(width: 8),
+                  Text(
+                    '($totalStr)',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-              ],
-            ),
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: () => _resetDay(day),
+                    icon: const Icon(Icons.restore, size: 16),
+                    label: const Text('Zeitänderungen zurücksetzen'),
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                  ),
+                ],
+              );
+            }),
             const SizedBox(height: 8),
             for (final w in byDay[day]!)
               Padding(
@@ -1297,6 +1326,7 @@ class _HomePageState extends State<HomePage> {
                       DraftLogTile(
                         key: ValueKey(w),
                         draft: w,
+                        ticketWidth: ticketWidth,
                         canMergeUp: canUp,
                         canMergeDown: canDown,
                         onChanged: () => setState(() {}),
@@ -2644,6 +2674,13 @@ class _HomePageState extends State<HomePage> {
                                 }
                                 st.meetingRules = newMeetingRules;
 
+                                // Non-Meeting Keywords übernehmen
+                                final allHints = <String>[
+                                  ...activeDefaults,
+                                  ...customHintCtrls.map((c) => c.text.trim()).where((s) => s.isNotEmpty),
+                                ];
+                                st.nonMeetingHintsMultiline = allHints.join('\n');
+
                                 await app.savePrefs();
 
                                 // Validieren
@@ -3160,6 +3197,37 @@ class _HomePageState extends State<HomePage> {
       _log += 'Sende an Jira…\n';
     });
 
+    // Progress-Dialog mit ValueNotifier für Live-Updates
+    final progressNotifier = ValueNotifier<(int, int, String)>((0, 1, 'Vorbereitung...'));
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('Buche Worklogs...'),
+          content: ValueListenableBuilder<(int, int, String)>(
+            valueListenable: progressNotifier,
+            builder: (_, value, __) {
+              final (current, total, label) = value;
+              final progress = total > 0 ? current / total : 0.0;
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  LinearProgressIndicator(value: progress),
+                  const SizedBox(height: 16),
+                  Text('Eintrag $current / $total'),
+                  const SizedBox(height: 8),
+                  Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
     try {
       final jira = JiraApi(
         baseUrl: state.settings.jiraBaseUrl,
@@ -3232,15 +3300,31 @@ class _HomePageState extends State<HomePage> {
 
       int ok = 0, fail = 0;
       final failures = <String>[];
+      final total = draftsToSend.length;
 
-      for (final d in draftsToSend) {
+      for (int i = 0; i < draftsToSend.length; i++) {
+        final d = draftsToSend[i];
         final key = _issueOverrides[_draftKey(d)] ?? d.issueKey;
         final keyOrId = keyToId[key] ?? key;
+        
+        // Update progress
+        progressNotifier.value = (i + 1, total, '$key – ${DateFormat('dd.MM.yyyy').format(d.start)}');
+        
+        // Entferne Präfix für Jira (z.B. "Meeting 09:00–10:00 – " oder "Arbeit")
+        String jiraComment = d.note;
+        // Pattern: "Meeting HH:mm–HH:mm – Titel" oder "Meeting HH:mm–HH:mm"
+        final meetingPrefixPattern = RegExp(r'^Meeting\s+\d{1,2}:\d{2}[–-]\d{1,2}:\d{2}\s*[–-]?\s*');
+        if (meetingPrefixPattern.hasMatch(jiraComment)) {
+          jiraComment = jiraComment.replaceFirst(meetingPrefixPattern, '').trim();
+        } else if (jiraComment == 'Arbeit' || jiraComment.startsWith('Arbeit ')) {
+          jiraComment = '';
+        }
+        
         final res = await worklogApi.createWorklog(
           issueKeyOrId: keyOrId,
           started: d.start,
           timeSpentSeconds: d.duration.inSeconds,
-          comment: d.note,
+          comment: jiraComment,
         );
         if (res.ok) {
           ok++;
@@ -3256,8 +3340,19 @@ class _HomePageState extends State<HomePage> {
       }
 
       final skippedCount = skippedDrafts.length;
+      
+      // Berechne Gesamtzeit der erfolgreich gebuchten Worklogs
+      final totalBookedDuration = draftsToSend.fold<Duration>(
+        Duration.zero,
+        (sum, d) => sum + d.duration,
+      );
+      final totalHours = totalBookedDuration.inHours;
+      final totalMinutes = totalBookedDuration.inMinutes.remainder(60);
+      final totalTimeStr = '${totalHours}h ${totalMinutes.toString().padLeft(2, '0')}m';
+      
       _log += '\nFertig. Erfolgreich: $ok, Fehler: $fail, '
-          'Übersprungen (Duplikat/Überlappung): $skippedCount\n';
+          'Übersprungen (Duplikat/Überlappung): $skippedCount\n'
+          'Gesamtzeit gebucht: $totalTimeStr\n';
       setState(() {});
 
       // Dialog-Text zusammensetzen
@@ -3272,6 +3367,7 @@ class _HomePageState extends State<HomePage> {
 
         final msg = StringBuffer()
           ..writeln('Erfolgreich gebuchte Worklogs: $ok')
+          ..writeln('Gesamtzeit gebucht: $totalTimeStr')
           ..writeln('Fehler: $fail')
           ..writeln('Übersprungen (Duplikat/Überlappung): $skippedCount');
 
@@ -3296,6 +3392,7 @@ class _HomePageState extends State<HomePage> {
 
         final msg = StringBuffer()
           ..writeln('Erfolgreich: $ok')
+          ..writeln('Gesamtzeit gebucht: $totalTimeStr')
           ..writeln('Fehler: $fail')
           ..writeln('Übersprungen (Duplikat/Überlappung): ${skippedDrafts.length}')
           ..writeln()
@@ -3316,9 +3413,12 @@ class _HomePageState extends State<HomePage> {
       }
     } catch (e, st) {
       setState(() => _log += 'EXCEPTION beim Senden: $e\n$st\n');
+      if (context.mounted) Navigator.of(context).pop(); // Progress-Dialog schließen
       await _showErrorDialog('Buchen fehlgeschlagen', '$e');
     } finally {
+      progressNotifier.dispose();
       if (mounted) {
+        if (context.mounted) Navigator.of(context).pop(); // Progress-Dialog schließen
         setState(() {
           _busy = false;
         });

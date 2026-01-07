@@ -286,8 +286,18 @@ List<IcsEvent> _expandRecurringForWindow({
         }
       }
 
-      instStart = instStart.add(const Duration(days: 1));
-      instEnd = instEnd.add(const Duration(days: 1));
+      // Preserve local time across DST boundaries by using calendar days
+      // instead of adding 24 hours (which breaks during DST transitions)
+      final eventDuration = instEnd.difference(instStart);
+      instStart = DateTime(
+        instStart.year,
+        instStart.month,
+        instStart.day + 1,
+        instStart.hour,
+        instStart.minute,
+        instStart.second,
+      );
+      instEnd = instStart.add(eventDuration);
     }
   }
 
