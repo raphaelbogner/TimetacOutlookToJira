@@ -87,11 +87,11 @@ class JiraWorklogApi {
       final tail = value.substring(value.length - 5);
       if (RegExp(r'[+-]\d{4}$').hasMatch(tail)) {
         final withColon = '${value.substring(0, value.length - 5)}${tail.substring(0, 3)}:${tail.substring(3)}';
-        return DateTime.parse(withColon);
+        return DateTime.parse(withColon).toLocal();
       }
     }
     // Fallback: falls Jira irgendwann mal ein „normales“ ISO 8601 mit Doppelpunkt liefert
-    return DateTime.parse(value);
+    return DateTime.parse(value).toLocal();
   }
 
   Future<JiraWorklogResponse> createWorklog({
@@ -144,6 +144,44 @@ class JiraWorklogApi {
       return resp.statusCode >= 200 && resp.statusCode < 300;
     } catch (e) {
       return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Aktualisiert einen Worklog (Startzeit und/oder Dauer)
+  Future<JiraWorklogResponse> updateWorklog({
+    required String issueKeyOrId,
+    required String worklogId,
+    required DateTime started,
+    required int timeSpentSeconds,
+    String? comment,
+  }) async {
+    final uri = Uri.parse('$_base/rest/api/3/issue/${Uri.encodeComponent(issueKeyOrId)}/worklog/${Uri.encodeComponent(worklogId)}');
+
+    final body = <String, dynamic>{
+      "started": _formatJiraStarted(started),
+      "timeSpentSeconds": timeSpentSeconds,
+    };
+    
+    if (comment != null) {
+      body["comment"] = _adfFromText(comment);
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final req = await client.openUrl('PUT', uri);
+      req.headers.set(HttpHeaders.authorizationHeader, _auth);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
+      req.add(utf8.encode(jsonEncode(body)));
+
+      final resp = await req.close().timeout(const Duration(seconds: 30));
+      final txt = await utf8.decodeStream(resp);
+      final ok = resp.statusCode >= 200 && resp.statusCode < 300;
+      return JiraWorklogResponse(ok: ok, body: txt.isEmpty ? null : txt);
+    } catch (e) {
+      return JiraWorklogResponse(ok: false, body: '$e');
     } finally {
       client.close(force: true);
     }

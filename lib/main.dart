@@ -18,6 +18,9 @@ import 'services/gitlab_api.dart';
 import 'services/ics_parser.dart';
 import 'services/jira_api.dart';
 import 'services/jira_worklog_api.dart';
+import 'services/delete_mode_service.dart';
+import 'services/jira_adjustment_service.dart';
+import 'services/time_comparison_service.dart';
 import 'ui/delete_mode_screen.dart';
 import 'ui/preview_utils.dart';
 import 'widgets/preview_table.dart';
@@ -661,6 +664,53 @@ class _HomePageState extends State<HomePage> {
     return res;
   }
 
+  /// Resolve Overlaps by "Punch Hole": Later (or more specific) meetings overwrite earlier ones.
+  List<DraftLog> _resolveMeetingOverlaps(List<DraftLog> inputs) {
+    if (inputs.isEmpty) return [];
+
+    // 1. Sort: Start ASC, then Duration DESC (Longer first -> processed earlier -> overwritten by shorter)
+    final sorted = inputs.toList()..sort((a, b) {
+      final cmp = a.start.compareTo(b.start);
+      if (cmp != 0) return cmp;
+      return b.duration.compareTo(a.duration); // Descending duration
+    });
+
+    final result = <DraftLog>[];
+
+    for (final candidate in sorted) {
+      final newResult = <DraftLog>[];
+      
+      for (final existing in result) {
+         final parts = _subtractDraft(existing, candidate);
+         newResult.addAll(parts);
+      }
+      
+      newResult.add(candidate);
+      result.clear();
+      result.addAll(newResult);
+    }
+    
+    result.sort((a, b) => a.start.compareTo(b.start));
+    return result;
+  }
+  
+  List<DraftLog> _subtractDraft(DraftLog source, DraftLog hole) {
+     final overlapStart = source.start.isAfter(hole.start) ? source.start : hole.start;
+     final overlapEnd = source.end.isBefore(hole.end) ? source.end : hole.end;
+     
+     if (overlapEnd.isAfter(overlapStart)) {
+        final parts = <DraftLog>[];
+        if (source.start.isBefore(overlapStart)) {
+           parts.add(source.copy()..end = overlapStart);
+        }
+        if (source.end.isAfter(overlapEnd)) {
+           parts.add(source.copy()..start = overlapEnd);
+        }
+        return parts;
+     }
+     return [source];
+  }
+
   List<DraftLog> _assignRestPiecesByCommits({
     required List<WorkWindow> pieces,
     required List<_CT> ordered,
@@ -1166,10 +1216,10 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  void _insertLog(int indexAfter, DateTime start, {bool isPause = false}) {
+  void _insertLog(int indexAfter, DateTime start, {bool isPause = false, bool isDoctorAppointment = false}) {
     setState(() {
-      // Default duration 5 mins
-      var end = start.add(Duration(minutes: isPause ? 15 : 5));
+      // Default duration 5 mins (15 for pause, 60 for doctor appointment)
+      var end = start.add(Duration(minutes: isPause ? 15 : (isDoctorAppointment ? 60 : 5)));
       
       // Smart Insert: Shift next log if overlap
       if (indexAfter < _drafts.length) {
@@ -1190,11 +1240,12 @@ class _HomePageState extends State<HomePage> {
       final newLog = DraftLog(
         start: start,
         end: end,
-        issueKey: isPause ? '' : context.read<AppState>().settings.fallbackIssueKey,
-        note: isPause ? 'Pause' : '',
+        issueKey: (isPause || isDoctorAppointment) ? '' : context.read<AppState>().settings.fallbackIssueKey,
+        note: isPause ? 'Pause' : (isDoctorAppointment ? 'Bezahlte Nichtarbeitszeit' : ''),
         deltaState: DeltaState.newEntry,
         isManuallyModified: true,
         isPause: isPause,
+        isDoctorAppointment: isDoctorAppointment,
       );
       
       _drafts.insert(indexAfter, newLog);
@@ -1267,10 +1318,13 @@ class _HomePageState extends State<HomePage> {
           for (final day in dayKeys) ...[
             Builder(builder: (context) {
               final dayLogs = byDay[day]!;
-              final totalDuration = dayLogs.fold<Duration>(
-                Duration.zero,
-                (sum, log) => sum + log.duration,
-              );
+              // Gesamtdauer: Pausen ausschließen, bezahlte Nichtarbeitszeit einschließen
+              final totalDuration = dayLogs
+                .where((log) => !log.isPause)  // Pausen nicht mitzählen
+                .fold<Duration>(
+                  Duration.zero,
+                  (sum, log) => sum + log.duration,
+                );
               final hours = totalDuration.inHours;
               final minutes = totalDuration.inMinutes.remainder(60);
               final totalStr = '${hours}h ${minutes.toString().padLeft(2, '0')}m';
@@ -1335,6 +1389,10 @@ class _HomePageState extends State<HomePage> {
                              final start = w.start.subtract(const Duration(minutes: 15));
                              _insertLog(idx, start, isPause: true);
                           },
+                          onInsertDoctorAppointment: () {
+                             final start = w.start.subtract(const Duration(minutes: 60));
+                             _insertLog(idx, start, isDoctorAppointment: true);
+                          },
                         ),
 
                       DraftLogTile(
@@ -1377,6 +1435,9 @@ class _HomePageState extends State<HomePage> {
                         },
                         onInsertPause: () {
                            _insertLog(idx + 1, w.end, isPause: true);
+                        },
+                        onInsertDoctorAppointment: () {
+                           _insertLog(idx + 1, w.end, isDoctorAppointment: true);
                         },
                       ),
                     ],
@@ -1583,6 +1644,7 @@ class _HomePageState extends State<HomePage> {
     final state = context.watch<AppState>();
     final locked = !state.isAllConfigured;
     final canCalculate = !locked && state.hasCsv && state.hasIcs;
+    final canCompare = state.hasCsv && state.range != null && !_busy;
 
     return Card(
       child: Padding(
@@ -1603,10 +1665,26 @@ class _HomePageState extends State<HomePage> {
                 icon: const Icon(Icons.send),
                 label: const Text('Buchen (Jira)'),
               ),
+              const SizedBox(width: 12),
+              FilledButton.icon(
+                onPressed: canCompare ? () => _compareWithTimetac(context) : null,
+                icon: const Icon(Icons.compare_arrows),
+                label: const Text('Zeiten vergleichen'),
+              ),
             ]),
             if (!state.hasCsv || !state.hasIcs)
               const Text(
-                'CSV und ICS laden, um „Berechnen“ zu aktivieren.',
+                'CSV und ICS laden, um „Berechnen" zu aktivieren.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            if (!canCompare && state.hasCsv)
+              const Text(
+                'Zeitraum wählen, um „Zeiten vergleichen" zu aktivieren.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            if (!canCompare && !state.hasCsv)
+              const Text(
+                'CSV laden und Zeitraum wählen, um „Zeiten vergleichen" zu aktivieren.',
                 style: TextStyle(fontSize: 12, color: Colors.grey),
               ),
           ],
@@ -2949,8 +3027,17 @@ class _HomePageState extends State<HomePage> {
                 );
               }
             }
+            }
+            
+            // Überlappungen innerhalb der Meetings auflösen
+            try {
+              final resolved = _resolveMeetingOverlaps(meetingDrafts);
+              meetingDrafts.clear();
+              meetingDrafts.addAll(resolved);
+            } catch (e) {
+              _log += 'FEHLER beim Auflösen von Meeting-Überlappungen: $e\n';
+            }
           }
-        }
 
         // Arzttermine als Pause behandeln, nur wenn keine KT/FT/UT/ZA vorliegen
         final ktDays = rowsForDay.fold<double>(0.0, (p, r) => p + r.sickDays);
@@ -2967,8 +3054,11 @@ class _HomePageState extends State<HomePage> {
           restPieces.addAll(subtractIntervals(w, meetingCutters));
         }
 
-        // Arztbesuch vom Rest abziehen (wie Pause), vom Tagesende rückwärts
-        final trimmedRest = _trimPiecesFromEndBy(doctor, restPieces);
+        // Arztbesuch vom Rest abziehen? NEIN!
+        // Timetac "Ende" ist oft der Zeitpunkt des Gehens. Die "Bezahlte Nichtarbeitszeit" kommt OBENDRAUF
+        // (verlängert den Tag). Wenn wir sie abziehen, kürzen wir die echte Anwesenheit weg.
+        // Daher: trimmedRest = restPieces (ungekürzt).
+        final trimmedRest = restPieces;
 
         // Rest auf Tickets verteilen
         final restDrafts = <DraftLog>[];
@@ -3018,11 +3108,79 @@ class _HomePageState extends State<HomePage> {
           }
         }
 
+        // Arzttermine aus Timetac erkennen (absenceTotal > 0)
+        // ABER: Nur wenn es kein voller Krankenstand/Feiertag/Urlaubstag ist
+        final doctorDrafts = <DraftLog>[];
+        final isFullSickDay = rowsForDay.any((r) => r.sickDays > 0);
+        final isFullHoliday = rowsForDay.any((r) => r.holidayDays > 0);
+        final isFullVacation = rowsForDay.any((r) => r.vacationHours.inHours >= 8);
+        
+        if (!isFullSickDay && !isFullHoliday && !isFullVacation) {
+          for (final r in rowsForDay) {
+            if (r.absenceTotal > Duration.zero) {
+               final doctorDuration = r.absenceTotal;
+               
+               // Sammle alle bisherigen Drafts (ohne Pausen) sortiert
+               final existingDrafts = [...meetingDrafts, ...restDrafts]
+                 ..sort((a, b) => a.start.compareTo(b.start));
+               
+               DateTime? gapStart;
+               DateTime? gapEnd;
+               
+               // Suche nach einer Lücke, die groß genug ist
+               if (existingDrafts.length >= 2) {
+                 for (int i = 0; i < existingDrafts.length - 1; i++) {
+                   final currentEnd = existingDrafts[i].end;
+                   final nextStart = existingDrafts[i + 1].start;
+                   final gapDuration = nextStart.difference(currentEnd);
+                   
+                   // Prüfe ob Lücke groß genug ist (mit etwas Puffer)
+                   if (gapDuration >= doctorDuration) {
+                     gapStart = currentEnd;
+                     gapEnd = currentEnd.add(doctorDuration);
+                     break;
+                   }
+                 }
+               }
+               
+               // Wenn keine passende Lücke gefunden: Am Ende des Arbeitstages
+               if (gapStart == null) {
+                 final endOfWork = r.end ?? (existingDrafts.isNotEmpty 
+                   ? existingDrafts.last.end 
+                   : DateTime(day.year, day.month, day.day, 17, 0));
+                 gapStart = endOfWork;
+                 gapEnd = endOfWork.add(doctorDuration);
+               }
+               
+               // Korrektur: Arzttermin darf nicht mit Pause überlappen (sollte danach starten)
+               for (final p in r.pauses) {
+                 // Prüfe auf Überlappung
+                 if (gapStart!.isBefore(p.end) && gapEnd!.isAfter(p.start)) {
+                   // Wenn Start in oder vor Pause liegt -> Verschiebe auf Pausenende
+                   if (p.end.isAfter(gapStart!)) {
+                     gapStart = p.end;
+                     gapEnd = gapStart!.add(doctorDuration);
+                   }
+                 }
+               }
+               
+               doctorDrafts.add(DraftLog(
+                 start: gapStart!,
+                 end: gapEnd!,
+                 issueKey: '',
+                 note: 'Bezahlte Nichtarbeitszeit',
+                 isDoctorAppointment: true,
+               ));
+            }
+          }
+        }
+
         // Drafts des Tages zusammenführen
         final dayDrafts = <DraftLog>[
           ...meetingDrafts,
           ...restDrafts,
           ...pauseDrafts,
+          ...doctorDrafts,
         ]..sort((a, b) => a.start.compareTo(b.start));
 
         // Ticket-Overrides anwenden, falls gesetzt
@@ -3030,7 +3188,16 @@ class _HomePageState extends State<HomePage> {
           final id = _draftKey(d);
           final overridden = _issueOverrides[id];
           if (overridden != null && overridden.trim().isNotEmpty && overridden != d.issueKey) {
-            return DraftLog(start: d.start, end: d.end, issueKey: overridden, note: d.note);
+            return DraftLog(
+              start: d.start, 
+              end: d.end, 
+              issueKey: overridden, 
+              note: d.note,
+              isPause: d.isPause,
+              isDoctorAppointment: d.isDoctorAppointment,
+              isManuallyModified: d.isManuallyModified,
+              deltaState: d.deltaState,
+            );
           }
           return d;
         }).toList();
@@ -3091,7 +3258,7 @@ class _HomePageState extends State<HomePage> {
       _log += 'EXCEPTION in Berechnung: $e\n$st\n';
     } finally {
       setState(() {
-        _tabIndex = 1;
+        _tabIndex = 2; // Wechsle zu "Geplante Worklogs" Tab
         _busy = false;
       });
     }
@@ -3279,8 +3446,8 @@ class _HomePageState extends State<HomePage> {
       final draftsToSend = <DraftLog>[];
 
       for (final d in _drafts) {
-        // Pausen niemals buchen
-        if (d.isPause) continue;
+        // Pausen und Arzttermine niemals buchen
+        if (d.shouldSkipBooking) continue;
         
         final isDeltaProtected =
             state.deltaModeEnabled && (d.deltaState == DeltaState.duplicate || d.deltaState == DeltaState.overlap);
@@ -3462,15 +3629,433 @@ class _HomePageState extends State<HomePage> {
       }
     }
   }
+
+  Future<void> _compareWithTimetac(BuildContext context) async {
+    final state = context.read<AppState>();
+    
+    if (state.range == null) {
+      await _showErrorDialog('Kein Zeitraum', 'Bitte wähle zuerst einen Zeitraum aus.');
+      return;
+    }
+
+    if (state.jiraAccountId == null) {
+      await _showErrorDialog('Jira nicht konfiguriert', 'Bitte stelle sicher, dass Jira korrekt konfiguriert ist.');
+      return;
+    }
+
+    setState(() {
+      _busy = true;
+      _log += '\n=== Zeiten vergleichen ===\n';
+    });
+
+    try {
+      final start = state.range!.start;
+      final end = state.range!.end;
+      
+      setState(() => _log += 'Zeitraum: ${DateFormat('dd.MM.yyyy').format(start)} - ${DateFormat('dd.MM.yyyy').format(end)}\n');
+
+      // Alle Tage im Zeitraum sammeln
+      final selectedDates = <DateTime>{};
+      var current = DateTime(start.year, start.month, start.day);
+      final endDay = DateTime(end.year, end.month, end.day);
+      while (!current.isAfter(endDay)) {
+        selectedDates.add(current);
+        current = current.add(const Duration(days: 1));
+      }
+
+      setState(() => _log += 'Lade Jira Worklogs für ${selectedDates.length} Tage via JQL...\n');
+
+      // Nutze DeleteModeService für korrekte JQL-basierte Abfrage
+      final jiraApi = JiraApi(
+        baseUrl: state.settings.jiraBaseUrl,
+        email: state.settings.jiraEmail,
+        apiToken: state.settings.jiraApiToken,
+      );
+      final worklogApi = JiraWorklogApi(
+        baseUrl: state.settings.jiraBaseUrl,
+        email: state.settings.jiraEmail,
+        apiToken: state.settings.jiraApiToken,
+      );
+      final deleteService = DeleteModeService(
+        jiraApi: jiraApi,
+        worklogApi: worklogApi,
+        currentUserAccountId: state.jiraAccountId!,
+      );
+
+      final allJiraWorklogs = await deleteService.fetchWorklogsForPeriod(start, end);
+
+      // Debug: Zeige was geladen wurde
+      int totalWorklogs = 0;
+      for (final entry in allJiraWorklogs.entries) {
+        totalWorklogs += entry.value.length;
+      }
+      setState(() => _log += 'Gefunden: $totalWorklogs Jira-Worklogs an ${allJiraWorklogs.length} Tagen\n');
+
+      // Debug: Zeige Details pro Tag
+      for (final entry in allJiraWorklogs.entries) {
+        final dayLogs = entry.value;
+        if (dayLogs.isNotEmpty) {
+          final earliest = dayLogs.map((w) => w.started).reduce((a, b) => a.isBefore(b) ? a : b);
+          final latest = dayLogs.map((w) => w.end).reduce((a, b) => a.isAfter(b) ? a : b);
+          setState(() => _log += '  ${entry.key}: ${dayLogs.length} Worklogs, ${DateFormat('HH:mm').format(earliest)} - ${DateFormat('HH:mm').format(latest)}\n');
+        }
+      }
+
+      setState(() => _log += 'Vergleiche Zeiten...\n');
+
+      // Vergleich durchführen
+      final comparisonService = TimeComparisonService();
+      final results = comparisonService.compare(
+        timetacRows: state.timetac,
+        jiraWorklogs: allJiraWorklogs,
+        selectedDates: selectedDates,
+      );
+
+      setState(() {
+        _busy = false;
+        _log += 'Vergleich abgeschlossen.\n';
+      });
+
+      if (!mounted) return;
+      _showComparisonDialog(results, allJiraWorklogs);
+
+    } catch (e, st) {
+      setState(() {
+        _busy = false;
+        _log += 'Fehler beim Vergleich: $e\n$st\n';
+      });
+      await _showErrorDialog('Vergleich fehlgeschlagen', '$e');
+    }
+  }
+
+  void _showComparisonDialog(List<DayComparisonResult> results, Map<String, List<JiraWorklog>> jiraWorklogs) {
+    final hasIssues = results.any((r) => r.hasIssues);
+    final jiraOnlyDays = results.where((r) => r.jiraOnlyDay).toList();
+    final timetacOnlyDays = results.where((r) => r.timetacOnlyDay).toList();
+    final withDifferences = results.where((r) => r.differences.isNotEmpty).toList();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(
+              hasIssues
+                  ? Icons.warning_amber_rounded
+                  : Icons.check_circle_outline,
+              color: hasIssues ? Colors.orange : Colors.green,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                hasIssues ? 'Unstimmigkeiten gefunden' : 'Alle Zeiten stimmen überein',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: 500,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!hasIssues && results.isNotEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16.0),
+                    child: Text('✓ Alle verglichenen Tage stimmen zwischen Timetac und Jira überein.'),
+                  ),
+                
+                if (results.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16.0),
+                    child: Text('Keine Tage mit Buchungen im gewählten Zeitraum gefunden.'),
+                  ),
+                
+                // Warnung: Jira hat Buchungen aber Timetac nicht
+                if (jiraOnlyDays.isNotEmpty) ...[
+                  const Text('⚠ Jira-Buchungen ohne Timetac-Eintrag:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 8,
+                    children: jiraOnlyDays.map((r) => Chip(
+                      label: Text(DateFormat('dd.MM.').format(r.date)),
+                      backgroundColor: Colors.red.shade100,
+                    )).toList(),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                
+                // Info: Timetac hat Daten, Jira nicht (noch nicht gebucht)
+                if (timetacOnlyDays.isNotEmpty) ...[
+                  const Text('ℹ Noch keine Jira-Buchungen:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 8,
+                    children: timetacOnlyDays.map((r) => Chip(
+                      label: Text(DateFormat('dd.MM.').format(r.date)),
+                      backgroundColor: Colors.blue.shade50,
+                    )).toList(),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
+                // Zeitunterschiede anzeigen
+                if (withDifferences.isNotEmpty) ...[
+                  const Text('Zeitunterschiede:', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  ...withDifferences.map((dayResult) => _buildDayDifferenceCard(dayResult)),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          if (withDifferences.isNotEmpty)
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _showAdjustmentPreview(withDifferences, jiraWorklogs);
+              },
+              icon: const Icon(Icons.auto_fix_high),
+              label: const Text('Anpassen (Vorschau)'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Schließen'),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  /// Zeigt Vorschau der Anpassungen und ermöglicht deren Anwendung
+  Future<void> _showAdjustmentPreview(
+    List<DayComparisonResult> daysWithDifferences, 
+    Map<String, List<JiraWorklog>> jiraWorklogs,
+  ) async {
+    final state = context.read<AppState>();
+    final s = state.settings;
+    
+    final worklogApi = JiraWorklogApi(
+      baseUrl: s.jiraBaseUrl,
+      email: s.jiraEmail,
+      apiToken: s.jiraApiToken,
+    );
+    final adjustmentService = JiraAdjustmentService(worklogApi);
+    
+    // Generiere Anpassungspläne für alle Tage
+    final allPlans = <DayAdjustmentPlan>[];
+    for (final dayResult in daysWithDifferences) {
+      final dayKey = DateFormat('yyyy-MM-dd').format(dayResult.date);
+      final dayJira = jiraWorklogs[dayKey] ?? [];
+      final dayTimetac = state.timetac.where((r) => 
+        r.date.year == dayResult.date.year && 
+        r.date.month == dayResult.date.month && 
+        r.date.day == dayResult.date.day
+      ).toList();
+      
+      final plan = adjustmentService.generatePlan(
+        date: dayResult.date,
+        timetacRows: dayTimetac,
+        jiraWorklogs: dayJira,
+      );
+      
+      if (plan.hasChanges) {
+        allPlans.add(plan);
+      }
+    }
+    
+    if (allPlans.isEmpty) {
+      if (!mounted) return;
+      await _showInfoDialog('Keine Anpassungen', 'Es konnten keine konkreten Anpassungen generiert werden.');
+      return;
+    }
+    
+    if (!mounted) return;
+    
+    // Zeige Vorschau-Dialog
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.preview, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('Anpassungs-Vorschau'),
+          ],
+        ),
+        content: SizedBox(
+          width: 600,
+          height: 400,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${allPlans.fold<int>(0, (sum, p) => sum + p.adjustments.length)} Änderungen an ${allPlans.length} Tagen:',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 12),
+                ...allPlans.map((plan) => Card(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          DateFormat('EEEE, dd.MM.yyyy', 'de_DE').format(plan.date),
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const Divider(),
+                        ...plan.groupedAdjustments.entries.map((group) => Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(group.key, style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
+                              ...group.value.map((adj) => Padding(
+                                padding: const EdgeInsets.only(left: 8, top: 2),
+                                child: Text(adj.description, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                              )),
+                            ],
+                          ),
+                        )),
+                      ],
+                    ),
+                  ),
+                )),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Abbrechen'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.check),
+            label: const Text('Anwenden'),
+          ),
+        ],
+      ),
+    );
+    
+    if (confirmed != true) return;
+    
+    // Anpassungen anwenden
+    setState(() => _busy = true);
+    
+    final allResults = <String>[];
+    for (final plan in allPlans) {
+      final results = await adjustmentService.applyPlan(plan);
+      allResults.addAll(results);
+    }
+    
+    setState(() {
+      _busy = false;
+      _log += '\n=== Jira-Anpassungen ===\n';
+      _log += allResults.join('\n');
+      _log += '\n';
+    });
+    
+    if (!mounted) return;
+    await _showInfoDialog(
+      'Anpassungen abgeschlossen',
+      '${allResults.where((r) => r.startsWith('✓')).length} Änderungen erfolgreich angewendet.\n\n'
+      '${allResults.where((r) => r.startsWith('✗')).length} Fehler.',
+    );
+  }
+
+  Widget _buildDayDifferenceCard(DayComparisonResult dayResult) {
+    // Helper für Dauer-Formatierung
+    String fmtDur(Duration d) {
+      final h = d.inHours;
+      final m = d.inMinutes % 60;
+      if (h > 0) return '${h}h ${m}m';
+      return '${m}m';
+    }
+    
+    // Prüfe ob es Pausen- oder Dauerunterschiede gibt (um Details anzuzeigen)
+    final hasPauseDiff = dayResult.differences.any((d) => 
+      d.type == TimeDifferenceType.pauseTime || 
+      d.type == TimeDifferenceType.duration
+    );
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              DateFormat('EEEE, dd.MM.yyyy', 'de_DE').format(dayResult.date),
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const Divider(),
+            ...dayResult.differences.map((diff) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4.0),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 100,
+                    child: Text(diff.typeLabel, style: const TextStyle(fontWeight: FontWeight.w500)),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Text('Timetac: ', style: TextStyle(color: Colors.grey.shade600)),
+                        Text(diff.timetacValueString, style: const TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(width: 16),
+                        Text('Jira: ', style: TextStyle(color: Colors.grey.shade600)),
+                        Text(diff.jiraValueString, style: const TextStyle(fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            )),
+            
+            // Pausen-Aufschlüsselung anzeigen wenn es Pausenunterschiede gibt
+            if (hasPauseDiff && (dayResult.timetacPause > Duration.zero || dayResult.timetacPaidNonWork > Duration.zero)) ...[
+              const SizedBox(height: 8),
+              const Divider(),
+              Text('Timetac Pausen-Aufschlüsselung:', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  const Icon(Icons.pause_circle_outline, size: 14, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Text('Pause: ${fmtDur(dayResult.timetacPause)}', style: const TextStyle(fontSize: 12)),
+                  const SizedBox(width: 16),
+                  const Icon(Icons.schedule, size: 14, color: Colors.amber),
+                  const SizedBox(width: 4),
+                  Text('Bez. Nichtarbeitszeit: ${fmtDur(dayResult.timetacPaidNonWork)}', style: const TextStyle(fontSize: 12)),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _HoverableInsertDivider extends StatefulWidget {
   final VoidCallback onInsertWorklog;
   final VoidCallback onInsertPause;
+  final VoidCallback onInsertDoctorAppointment;
 
   const _HoverableInsertDivider({
     required this.onInsertWorklog,
     required this.onInsertPause,
+    required this.onInsertDoctorAppointment,
   });
 
   @override
@@ -3507,6 +4092,16 @@ class _HoverableInsertDividerState extends State<_HoverableInsertDivider> {
               Icon(Icons.pause_circle_outline, size: 18),
               SizedBox(width: 8),
               Text('Pause einfügen'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          onTap: widget.onInsertDoctorAppointment,
+          child: const Row(
+            children: [
+              Icon(Icons.schedule, size: 18, color: Colors.amber),
+              SizedBox(width: 8),
+              Text('Bezahlte Nichtarbeitszeit einfügen'),
             ],
           ),
         ),

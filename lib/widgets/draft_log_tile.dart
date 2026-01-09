@@ -132,10 +132,10 @@ class _DraftLogTileState extends State<DraftLogTile> {
   Widget build(BuildContext context) {
     final d = widget.draft;
     
-    // Color logic - Pausen sind immer grau/gedimmt
+    // Color logic - Pausen und bezahlte Nichtarbeitszeit sind immer gedimmt
     Color? statusColor;
-    if (d.isPause) {
-      statusColor = Colors.grey.shade500;
+    if (d.isPause || d.isDoctorAppointment) {
+      statusColor = d.isDoctorAppointment ? Colors.amber.shade700 : Colors.grey.shade500;
     } else if (d.isDuplicate) {
       statusColor = Colors.grey;
     } else if (d.isOverlap) {
@@ -144,15 +144,16 @@ class _DraftLogTileState extends State<DraftLogTile> {
 
     return GestureDetector(
       onSecondaryTapUp: (details) {
-        if (!d.isPause) _showContextMenu(context, details.globalPosition);
+        if (!d.shouldSkipBooking) _showContextMenu(context, details.globalPosition);
       },
       child: Container(
-        color: d.isPause ? Colors.grey.shade100.withAlpha(80) : Colors.transparent,
+        color: d.shouldSkipBooking ? (d.isDoctorAppointment ? Colors.amber.shade50.withAlpha(80) : Colors.grey.shade100.withAlpha(80)) : Colors.transparent,
         padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
         child: Row(
           children: [
             // Status Icon
-            if (d.isPause) const Tooltip(message: 'Pause (wird nicht gebucht)', child: Icon(Icons.pause_circle_outline, size: 16, color: Colors.grey))
+            if (d.isDoctorAppointment) const Tooltip(message: 'Bezahlte Nichtarbeitszeit (wird nicht gebucht)', child: Icon(Icons.schedule, size: 16, color: Colors.amber))
+            else if (d.isPause) const Tooltip(message: 'Pause (wird nicht gebucht)', child: Icon(Icons.pause_circle_outline, size: 16, color: Colors.grey))
             else if (d.isManuallyModified) const Tooltip(message: 'Manuell bearbeitet', child: Icon(Icons.edit, size: 16, color: Colors.blue))
             else if (d.isNew) const Icon(Icons.fiber_new, size: 16, color: Colors.green)
             else if (d.isDuplicate) const Icon(Icons.check_circle, size: 16, color: Colors.grey)
@@ -161,7 +162,7 @@ class _DraftLogTileState extends State<DraftLogTile> {
             const SizedBox(width: 8),
 
             // Ticket (nur für normale Worklogs)
-            if (d.isPause)
+            if (d.shouldSkipBooking)
               const SizedBox(width: 48) // Platzhalter für den Button
             else
               IconButton(
@@ -175,15 +176,15 @@ class _DraftLogTileState extends State<DraftLogTile> {
                 },
               ),
             
-            // Ticket Key Display oder "Pause"
+            // Ticket Key Display oder "Pause"/"Arzttermin"
             SizedBox(
               width: widget.ticketWidth ?? 100,
               child: Text(
-                d.isPause ? '— Pause —' : d.issueKey,
+                d.isDoctorAppointment ? '' : (d.isPause ? '' : d.issueKey),
                 style: TextStyle(
                   fontFamily: 'monospace',
-                  fontWeight: d.isPause ? FontWeight.normal : FontWeight.bold,
-                  fontStyle: d.isPause ? FontStyle.italic : FontStyle.normal,
+                  fontWeight: d.shouldSkipBooking ? FontWeight.normal : FontWeight.bold,
+                  fontStyle: d.shouldSkipBooking ? FontStyle.italic : FontStyle.normal,
                   color: statusColor,
                 ),
               ),

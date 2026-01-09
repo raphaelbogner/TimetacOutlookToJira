@@ -34,11 +34,15 @@ class DraftLog {
 
   bool isManuallyModified;
   bool isPause; // Markiert Pausen-Einträge (werden nicht gebucht)
+  bool isDoctorAppointment; // Markiert Arzttermine (werden nicht gebucht, zählen als Pause)
 
   Duration get duration => end.difference(start);
   bool get isDuplicate => deltaState == DeltaState.duplicate;
   bool get isOverlap => deltaState == DeltaState.overlap;
   bool get isNew => deltaState == DeltaState.newEntry;
+  
+  /// Ob dieser Eintrag beim Buchen übersprungen werden soll
+  bool get shouldSkipBooking => isPause || isDoctorAppointment;
 
   DraftLog({
     required this.start,
@@ -48,6 +52,7 @@ class DraftLog {
     this.deltaState = DeltaState.newEntry,
     this.isManuallyModified = false,
     this.isPause = false,
+    this.isDoctorAppointment = false,
   });
 
   DraftLog copy() => DraftLog(
@@ -58,6 +63,7 @@ class DraftLog {
         deltaState: deltaState,
         isManuallyModified: isManuallyModified,
         isPause: isPause,
+        isDoctorAppointment: isDoctorAppointment,
       );
 }
 
