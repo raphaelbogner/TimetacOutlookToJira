@@ -1861,12 +1861,180 @@ class _HomePageState extends State<HomePage> {
                     padding: const EdgeInsets.all(16),
                     child: Column(
                       children: [
-                        // Titelzeile
+                        // Titelzeile mit Import/Export
                         Row(
                           children: [
                             const Expanded(
                               child: Text('Einstellungen', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
                             ),
+                            // Global Import Button
+                            IconButton(
+                              tooltip: 'Alle Einstellungen importieren (JSON)',
+                              onPressed: () async {
+                                final result = await FilePicker.platform.pickFiles(
+                                  type: FileType.custom,
+                                  allowedExtensions: ['json'],
+                                  dialogTitle: 'Einstellungen importieren',
+                                );
+                                if (result == null || result.files.isEmpty) return;
+                                try {
+                                  final file = File(result.files.single.path!);
+                                  final jsonStr = await file.readAsString();
+                                  final imported = SettingsModel.fromJson(jsonDecode(jsonStr) as Map<String, dynamic>);
+                                  
+                                  // Update all controllers
+                                  baseCtl.text = imported.jiraBaseUrl;
+                                  mailCtl.text = imported.jiraEmail;
+                                  jiraTokCtl.text = imported.jiraApiToken;
+                                  meetingCtl.text = imported.meetingIssueKey;
+                                  fallbackCtl.text = imported.fallbackIssueKey;
+                                  delimCtl.text = imported.csvDelimiter;
+                                  hasHeader = imported.csvHasHeader;
+                                  descCtl.text = imported.csvColDescription;
+                                  dateCtl.text = imported.csvColDate;
+                                  startCtl.text = imported.csvColStart;
+                                  endCtl.text = imported.csvColEnd;
+                                  durCtl.text = imported.csvColDuration;
+                                  pauseTotalCtl.text = imported.csvColPauseTotal;
+                                  pauseRangesCtl.text = imported.csvColPauseRanges;
+                                  bnaCtl.text = imported.csvColAbsenceTotal;
+                                  ktCtl.text = imported.csvColSick;
+                                  ftCtl.text = imported.csvColHoliday;
+                                  utCtl.text = imported.csvColVacation;
+                                  zaCtl.text = imported.csvColTimeCompensation;
+                                  glBaseCtl.text = imported.gitlabBaseUrl;
+                                  glTokCtl.text = imported.gitlabToken;
+                                  glProjCtl.text = imported.gitlabProjectIds;
+                                  glMailCtl.text = imported.gitlabAuthorEmail;
+                                  noGitlab = imported.noGitlabAccount;
+                                  
+                                  // Non-Meeting Keywords
+                                  activeDefaults = SettingsModel.defaultNonMeetingHintsList
+                                      .where((d) => imported.nonMeetingHintsList.contains(d))
+                                      .toSet();
+                                  customHintCtrls.clear();
+                                  for (final h in imported.nonMeetingHintsList) {
+                                    if (!SettingsModel.defaultNonMeetingHintsList.contains(h)) {
+                                      customHintCtrls.add(TextEditingController(text: h));
+                                    }
+                                  }
+                                  
+                                  // Meeting Rules
+                                  meetingRulePatternCtrls.clear();
+                                  meetingRuleTicketCtrls.clear();
+                                  for (final r in imported.meetingRules) {
+                                    meetingRulePatternCtrls.add(TextEditingController(text: r.pattern));
+                                    meetingRuleTicketCtrls.add(TextEditingController(text: r.issueKey));
+                                  }
+                                  
+                                  // Title Replacement Rules
+                                  titleReplacementTriggerCtrls.clear();
+                                  titleReplacementReplacementsCtrls.clear();
+                                  for (final r in imported.titleReplacementRules) {
+                                    titleReplacementTriggerCtrls.add(TextEditingController(text: r.triggerWord));
+                                    titleReplacementReplacementsCtrls.add(TextEditingController(text: r.replacements.join('\n')));
+                                  }
+                                  
+                                  markRebuild(setDlg);
+                                  if (ctx.mounted) {
+                                    ScaffoldMessenger.of(ctx).showSnackBar(
+                                      const SnackBar(content: Text('Einstellungen erfolgreich importiert')),
+                                    );
+                                  }
+                                } catch (e) {
+                                  if (ctx.mounted) {
+                                    ScaffoldMessenger.of(ctx).showSnackBar(
+                                      SnackBar(content: Text('Fehler beim Import: $e')),
+                                    );
+                                  }
+                                }
+                              },
+                              icon: const Icon(Icons.file_download),
+                            ),
+                            // Global Export Button
+                            IconButton(
+                              tooltip: 'Alle Einstellungen exportieren (JSON)',
+                              onPressed: () async {
+                                // Build current settings from controllers
+                                final exportSettings = SettingsModel(
+                                  jiraBaseUrl: baseCtl.text.trim(),
+                                  jiraEmail: mailCtl.text.trim(),
+                                  jiraApiToken: jiraTokCtl.text.trim(),
+                                  meetingIssueKey: meetingCtl.text.trim(),
+                                  fallbackIssueKey: fallbackCtl.text.trim(),
+                                  csvDelimiter: delimCtl.text.trim(),
+                                  csvHasHeader: hasHeader,
+                                  csvColDescription: descCtl.text.trim(),
+                                  csvColDate: dateCtl.text.trim(),
+                                  csvColStart: startCtl.text.trim(),
+                                  csvColEnd: endCtl.text.trim(),
+                                  csvColDuration: durCtl.text.trim(),
+                                  csvColPauseTotal: pauseTotalCtl.text.trim(),
+                                  csvColPauseRanges: pauseRangesCtl.text.trim(),
+                                  csvColAbsenceTotal: bnaCtl.text.trim(),
+                                  csvColSick: ktCtl.text.trim(),
+                                  csvColHoliday: ftCtl.text.trim(),
+                                  csvColVacation: utCtl.text.trim(),
+                                  csvColTimeCompensation: zaCtl.text.trim(),
+                                  gitlabBaseUrl: glBaseCtl.text.trim(),
+                                  gitlabToken: glTokCtl.text.trim(),
+                                  gitlabProjectIds: glProjCtl.text.trim(),
+                                  gitlabAuthorEmail: glMailCtl.text.trim(),
+                                  noGitlabAccount: noGitlab,
+                                  nonMeetingHintsMultiline: [
+                                    ...activeDefaults,
+                                    ...customHintCtrls.map((c) => c.text.trim()).where((s) => s.isNotEmpty),
+                                  ].join('\n'),
+                                  meetingRules: [
+                                    for (var i = 0; i < meetingRulePatternCtrls.length; i++)
+                                      if (meetingRulePatternCtrls[i].text.trim().isNotEmpty &&
+                                          meetingRuleTicketCtrls[i].text.trim().isNotEmpty)
+                                        MeetingRule(
+                                          pattern: meetingRulePatternCtrls[i].text.trim(),
+                                          issueKey: meetingRuleTicketCtrls[i].text.trim(),
+                                        ),
+                                  ],
+                                  titleReplacementRules: [
+                                    for (var i = 0; i < titleReplacementTriggerCtrls.length; i++)
+                                      if (titleReplacementTriggerCtrls[i].text.trim().isNotEmpty &&
+                                          titleReplacementReplacementsCtrls[i].text.trim().isNotEmpty)
+                                        TitleReplacementRule(
+                                          triggerWord: titleReplacementTriggerCtrls[i].text.trim(),
+                                          replacements: titleReplacementReplacementsCtrls[i].text
+                                              .split(RegExp(r'\r?\n'))
+                                              .map((s) => s.trim())
+                                              .where((s) => s.isNotEmpty)
+                                              .toList(),
+                                        ),
+                                  ],
+                                );
+                                
+                                final jsonStr = const JsonEncoder.withIndent('  ').convert(exportSettings.toJson());
+                                final savePath = await FilePicker.platform.saveFile(
+                                  dialogTitle: 'Einstellungen exportieren',
+                                  fileName: 'chronos_settings.json',
+                                  type: FileType.custom,
+                                  allowedExtensions: ['json'],
+                                );
+                                if (savePath == null) return;
+                                try {
+                                  await File(savePath).writeAsString(jsonStr);
+                                  if (ctx.mounted) {
+                                    ScaffoldMessenger.of(ctx).showSnackBar(
+                                      const SnackBar(content: Text('Einstellungen erfolgreich exportiert')),
+                                    );
+                                  }
+                                } catch (e) {
+                                  if (ctx.mounted) {
+                                    ScaffoldMessenger.of(ctx).showSnackBar(
+                                      SnackBar(content: Text('Fehler beim Export: $e')),
+                                    );
+                                  }
+                                }
+                              },
+                              icon: const Icon(Icons.file_upload),
+                            ),
+                            const SizedBox(width: 8),
                             IconButton(
                               tooltip: 'Schließen',
                               onPressed: () => Navigator.pop(ctx),
