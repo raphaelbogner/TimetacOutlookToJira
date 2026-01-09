@@ -25,6 +25,7 @@ import 'ui/delete_mode_screen.dart';
 import 'ui/preview_utils.dart';
 import 'widgets/preview_table.dart';
 import 'widgets/draft_log_tile.dart';
+import 'services/title_replacement_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -1800,12 +1801,22 @@ class _HomePageState extends State<HomePage> {
         .toList()
       ..sort();
 
+    // Titel-Ersetzungsregeln
+    final titleReplacementRules = List<TitleReplacementRule>.from(s.titleReplacementRules);
+    final titleReplacementTriggerCtrls = <TextEditingController>[];
+    final titleReplacementReplacementsCtrls = <TextEditingController>[];
+
+    for (final r in titleReplacementRules) {
+      titleReplacementTriggerCtrls.add(TextEditingController(text: r.triggerWord));
+      titleReplacementReplacementsCtrls.add(TextEditingController(text: r.replacements.join('\n')));
+    }
+
     await showDialog(
       context: context,
       useSafeArea: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlg) => DefaultTabController(
-          length: 5,
+          length: 6,
           child: LayoutBuilder(
             builder: (c, cons) {
               final media = MediaQuery.of(c);
@@ -1910,6 +1921,14 @@ class _HomePageState extends State<HomePage> {
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   Text('Non-Meeting Keywords'),
+                                ],
+                              ),
+                            ),
+                            const Tab(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text('Titel-Ersetzung'),
                                 ],
                               ),
                             ),
@@ -2710,6 +2729,129 @@ class _HomePageState extends State<HomePage> {
                                     ],
                                   ),
                                 ),
+
+                                // ------- TITEL-ERSETZUNG -------
+                                SingleChildScrollView(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    spacing: 8,
+                                    children: [
+                                      sectionTitle(ctx, 'Titel-Ersetzung (für Förderung)'),
+                                      const Text(
+                                        'Das Trigger-Wort wird zufällig durch eine der Alternativen ersetzt. '
+                                        'Z.B. "Abstimmung" → "Technische Abstimmung"',
+                                      ),
+                                      const SizedBox(height: 8),
+
+                                      // Vorschläge für Trigger-Wörter
+                                      if (TitleReplacementService.suggestedTriggerWords.isNotEmpty)
+                                        Wrap(
+                                          spacing: 8,
+                                          runSpacing: 4,
+                                          children: [
+                                            const Text('Vorschläge: ', style: TextStyle(fontStyle: FontStyle.italic)),
+                                            ...TitleReplacementService.suggestedTriggerWords.map(
+                                              (w) => ActionChip(
+                                                label: Text(w),
+                                                onPressed: () {
+                                                  // Prüfen ob das Trigger-Wort schon existiert
+                                                  final exists = titleReplacementTriggerCtrls.any(
+                                                    (c) => c.text.toLowerCase() == w.toLowerCase(),
+                                                  );
+                                                  if (!exists) {
+                                                    titleReplacementTriggerCtrls.add(TextEditingController(text: w));
+                                                    final suggestions = TitleReplacementService.suggestedReplacements[w] ?? [];
+                                                    titleReplacementReplacementsCtrls.add(
+                                                      TextEditingController(text: suggestions.join('\n')),
+                                                    );
+                                                    markRebuild(setDlg);
+                                                  }
+                                                },
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+
+                                      const SizedBox(height: 12),
+
+                                      // Liste der Regeln
+                                      ListView.builder(
+                                        shrinkWrap: true,
+                                        physics: const NeverScrollableScrollPhysics(),
+                                        itemCount: titleReplacementTriggerCtrls.length,
+                                        itemBuilder: (ctx2, i) {
+                                          return Card(
+                                            margin: const EdgeInsets.symmetric(vertical: 6),
+                                            child: Padding(
+                                              padding: const EdgeInsets.all(12.0),
+                                              child: Column(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Row(
+                                                    children: [
+                                                      Expanded(
+                                                        child: TextField(
+                                                          controller: titleReplacementTriggerCtrls[i],
+                                                          decoration: const InputDecoration(
+                                                            labelText: 'Trigger-Wort (z.B. "Abstimmung")',
+                                                            border: OutlineInputBorder(),
+                                                          ),
+                                                          onChanged: (_) => markRebuild(setDlg),
+                                                        ),
+                                                      ),
+                                                      const SizedBox(width: 8),
+                                                      IconButton(
+                                                        tooltip: 'Regel löschen',
+                                                        icon: const Icon(Icons.delete, color: Colors.red),
+                                                        onPressed: () {
+                                                          titleReplacementTriggerCtrls.removeAt(i);
+                                                          titleReplacementReplacementsCtrls.removeAt(i);
+                                                          markRebuild(setDlg);
+                                                        },
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  const SizedBox(height: 12),
+                                                  TextField(
+                                                    controller: titleReplacementReplacementsCtrls[i],
+                                                    decoration: const InputDecoration(
+                                                      labelText: 'Ersetzungen (eine pro Zeile)',
+                                                      border: OutlineInputBorder(),
+                                                      alignLabelWithHint: true,
+                                                    ),
+                                                    maxLines: 4,
+                                                    onChanged: (_) => markRebuild(setDlg),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+
+                                      if (titleReplacementTriggerCtrls.isEmpty)
+                                        const Padding(
+                                          padding: EdgeInsets.symmetric(vertical: 16),
+                                          child: Text(
+                                            'Keine Ersetzungsregeln vorhanden. '
+                                            'Klicke auf einen Vorschlag oben oder füge eine neue Regel hinzu.',
+                                            style: TextStyle(fontStyle: FontStyle.italic, color: Colors.grey),
+                                          ),
+                                        ),
+
+                                      const SizedBox(height: 8),
+                                      FilledButton.icon(
+                                        onPressed: () {
+                                          titleReplacementTriggerCtrls.add(TextEditingController());
+                                          titleReplacementReplacementsCtrls.add(TextEditingController());
+                                          markRebuild(setDlg);
+                                        },
+                                        icon: const Icon(Icons.add),
+                                        label: const Text('Neue Regel hinzufügen'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -2775,6 +2917,24 @@ class _HomePageState extends State<HomePage> {
                                   ...customHintCtrls.map((c) => c.text.trim()).where((s) => s.isNotEmpty),
                                 ];
                                 st.nonMeetingHintsMultiline = allHints.join('\n');
+
+                                // Titel-Ersetzungsregeln übernehmen
+                                final newTitleReplacementRules = <TitleReplacementRule>[];
+                                for (var i = 0; i < titleReplacementTriggerCtrls.length; i++) {
+                                  final trigger = titleReplacementTriggerCtrls[i].text.trim();
+                                  final replacementsText = titleReplacementReplacementsCtrls[i].text.trim();
+                                  if (trigger.isEmpty || replacementsText.isEmpty) continue;
+                                  final replacements = replacementsText
+                                      .split(RegExp(r'\r?\n'))
+                                      .map((s) => s.trim())
+                                      .where((s) => s.isNotEmpty)
+                                      .toList();
+                                  if (replacements.isEmpty) continue;
+                                  newTitleReplacementRules.add(
+                                    TitleReplacementRule(triggerWord: trigger, replacements: replacements),
+                                  );
+                                }
+                                st.titleReplacementRules = newTitleReplacementRules;
 
                                 await app.savePrefs();
 
@@ -3017,12 +3177,19 @@ class _HomePageState extends State<HomePage> {
               final e1 = e.end.isBefore(w.end) ? e.end : w.end;
               if (e1.isAfter(s1)) {
                 final titleSuffix = titleText.isEmpty ? '' : '– $titleText';
+                final noteText = 'Meeting $titleSuffix';
+                
+                // Titel-Ersetzung anwenden
+                final titleRules = state.settings.titleReplacementRules;
+                final (:newTitle, :originalTitle) = TitleReplacementService.applyReplacement(noteText, titleRules);
+                
                 meetingDrafts.add(
                   DraftLog(
                     start: s1,
                     end: e1,
                     issueKey: issueKeyForMeeting,
-                    note: 'Meeting $titleSuffix',
+                    note: newTitle,
+                    originalNote: originalTitle,
                   ),
                 );
               }

@@ -213,21 +213,44 @@ class _DraftLogTileState extends State<DraftLogTile> {
 
             const SizedBox(width: 12),
 
-            // Note (Editable)
+            // Note (Editable) - with optional original title above
             Expanded(
-              child: TextField(
-                controller: _noteCtrl,
-                focusNode: _noteFocus,
-                decoration: const InputDecoration(
-                  isDense: true,
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.symmetric(vertical: 8),
-                ),
-                style: TextStyle(color: statusColor),
-                onSubmitted: (_) {
-                   // Trigger save on enter
-                   _noteFocus.unfocus();
-                },
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Original title (if replaced) - small and crossed out
+                  if (d.originalNote != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Text(
+                        d.originalNote!,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade500,
+                          decoration: TextDecoration.lineThrough,
+                          fontStyle: FontStyle.italic,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  // Editable note field
+                  TextField(
+                    controller: _noteCtrl,
+                    focusNode: _noteFocus,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.symmetric(vertical: 8),
+                    ),
+                    style: TextStyle(color: statusColor),
+                    onSubmitted: (_) {
+                       // Trigger save on enter
+                       _noteFocus.unfocus();
+                    },
+                  ),
+                ],
               ),
             ),
             

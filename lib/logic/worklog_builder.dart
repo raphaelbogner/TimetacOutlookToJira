@@ -29,6 +29,9 @@ class DraftLog {
   DateTime end;
   String issueKey;
   String note;
+  
+  /// Original-Meeting-Titel vor Ersetzung (null wenn keine Ersetzung stattfand)
+  String? originalNote;
 
   DeltaState deltaState;
 
@@ -49,6 +52,7 @@ class DraftLog {
     required this.end,
     required this.issueKey,
     required this.note,
+    this.originalNote,
     this.deltaState = DeltaState.newEntry,
     this.isManuallyModified = false,
     this.isPause = false,
@@ -60,12 +64,14 @@ class DraftLog {
         end: end,
         issueKey: issueKey,
         note: note,
+        originalNote: originalNote,
         deltaState: deltaState,
         isManuallyModified: isManuallyModified,
         isPause: isPause,
         isDoctorAppointment: isDoctorAppointment,
       );
 }
+
 
 /// Merged überlappende oder direkt aneinanderstoßende Intervalle (Union).
 List<WorkWindow> mergeWorkWindows(List<WorkWindow> windows) {

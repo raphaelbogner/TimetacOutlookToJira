@@ -38,6 +38,9 @@ class SettingsModel {
   // meeting title to ticket rules
   List<MeetingRule> meetingRules;
 
+  // title replacement rules (for Förderung)
+  List<TitleReplacementRule> titleReplacementRules;
+
   // ---- Feste, unveränderliche Defaults (öffentlich) ----
   static const List<String> defaultNonMeetingHintsList = <String>[
     'homeoffice',
@@ -100,6 +103,7 @@ class SettingsModel {
     this.gitlabLookbackDays = 30,
     this.noGitlabAccount = false,
     this.meetingRules = const [],
+    this.titleReplacementRules = const [],
     String? nonMeetingHintsMultiline,
   }) : nonMeetingHintsMultiline = nonMeetingHintsMultiline ?? defaultNonMeetingHintsMultiline;
 
@@ -143,6 +147,7 @@ class SettingsModel {
         'noGitlabAccount': noGitlabAccount,
         'nonMeetingHintsMultiline': nonMeetingHintsMultiline,
         'meetingRules': meetingRules.map((r) => r.toJson()).toList(),
+        'titleReplacementRules': titleReplacementRules.map((r) => r.toJson()).toList(),
       };
 
   factory SettingsModel.fromJson(Map<String, dynamic> m) => SettingsModel(
@@ -176,6 +181,9 @@ class SettingsModel {
         nonMeetingHintsMultiline: (m['nonMeetingHintsMultiline'] ?? defaultNonMeetingHintsMultiline) as String,
         meetingRules: ((m['meetingRules'] as List?) ?? const [])
             .map((e) => MeetingRule.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        titleReplacementRules: ((m['titleReplacementRules'] as List?) ?? const [])
+            .map((e) => TitleReplacementRule.fromJson(e as Map<String, dynamic>))
             .toList(),
       );
 }
@@ -259,5 +267,28 @@ class MeetingRule {
   Map<String, dynamic> toJson() => {
         'pattern': pattern,
         'issueKey': issueKey,
+      };
+}
+
+/// Regel für automatische Titel-Ersetzung (für Förderung)
+class TitleReplacementRule {
+  TitleReplacementRule({
+    required this.triggerWord,
+    required this.replacements,
+  });
+
+  String triggerWord; // z.B. "Abstimmung"
+  List<String> replacements; // z.B. ["Technische Abstimmung", "Technische Analyse"]
+
+  factory TitleReplacementRule.fromJson(Map<String, dynamic> json) => TitleReplacementRule(
+        triggerWord: (json['triggerWord'] ?? '') as String,
+        replacements: ((json['replacements'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'triggerWord': triggerWord,
+        'replacements': replacements,
       };
 }
