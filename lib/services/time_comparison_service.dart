@@ -5,10 +5,13 @@ import 'jira_worklog_api.dart';
 
 /// Typ der Zeitdifferenz
 enum TimeDifferenceType {
-  startTime,   // Arbeitsbeginn
-  endTime,     // Arbeitsende
-  pauseTime,   // Pausenzeit
-  duration,    // Netto-Arbeitszeit
+  startTime,         // Arbeitsbeginn
+  endTime,           // Arbeitsende
+  pauseTime,         // Pausenzeit
+  duration,          // Netto-Arbeitszeit
+  jiraBeforeWork,    // Jira-Buchung vor Arbeitsbeginn
+  jiraAfterWork,     // Jira-Buchung nach Arbeitsende
+  jiraDuringBreak,   // Jira-Buchung während Pause/Abwesenheit
 }
 
 /// Eine einzelne Zeitdifferenz an einem Tag
@@ -19,6 +22,8 @@ class TimeDifference {
   final DateTime? jiraTime;        // Für Start/Ende: die Zeit
   final Duration? timetacDuration; // Für Pausen/Dauer: die Dauer
   final Duration? jiraDuration;    // Für Pausen/Dauer: die Dauer
+  final String? issueKey;          // Für Outlier: betroffenes Ticket
+  final String? details;           // Für Outlier: Details
   
   TimeDifference({
     required this.date,
@@ -27,6 +32,8 @@ class TimeDifference {
     this.jiraTime,
     this.timetacDuration,
     this.jiraDuration,
+    this.issueKey,
+    this.details,
   });
   
   String get typeLabel {
@@ -39,6 +46,12 @@ class TimeDifference {
         return 'Pausenzeit';
       case TimeDifferenceType.duration:
         return 'Netto-Arbeitszeit';
+      case TimeDifferenceType.jiraBeforeWork:
+        return 'Jira vor Arbeitsbeginn';
+      case TimeDifferenceType.jiraAfterWork:
+        return 'Jira nach Arbeitsende';
+      case TimeDifferenceType.jiraDuringBreak:
+        return 'Jira während Pause';
     }
   }
   
@@ -107,10 +120,16 @@ class TimeComparisonService {
   /// 
   /// Tage ohne Timetac-Daten werden IGNORIERT, außer Jira hat Buchungen
   /// für diesen Tag (wird als Warnung angezeigt).
+  /// 
+  /// [outlierModeOnly]: Wenn true, werden nur Jira-Buchungen gemeldet die:
+  /// - vor dem Timetac-Arbeitsbeginn liegen
+  /// - nach dem Timetac-Arbeitsende liegen
+  /// - während Pausen oder Abwesenheiten liegen
   List<DayComparisonResult> compare({
     required List<TimetacRow> timetacRows,
     required Map<String, List<JiraWorklog>> jiraWorklogs,
     required Set<DateTime> selectedDates,
+    bool outlierModeOnly = false,
   }) {
     final results = <DayComparisonResult>[];
     
@@ -130,24 +149,50 @@ class TimeComparisonService {
       // Jira-Worklogs für diesen Tag  
       final dayJira = jiraWorklogs[dayKey] ?? [];
       
-      // Prüfe ob es ein voller Krankenstand/Feiertag/Urlaubstag ist
-      // Prüfe ob es ein voller Krankenstand/Feiertag/Urlaubstag ist
-      final isFullAbsence = dayTimetac.any((r) => 
+      // Prüfe ob reguläre Arbeit existiert (Zeilen mit Start/Ende die keine Abwesenheit sind)
+      final hasWork = dayTimetac.any((r) => 
+        r.start != null && r.end != null && !_isAbsence(r.description)
+      );
+
+      // Prüfe ob es Abwesenheiten gibt
+      final hasAbsence = dayTimetac.any((r) => 
         r.sickDays > 0 || 
         r.holidayDays > 0 || 
-        r.vacationHours.inMinutes > 60 || // Mehr als 1h Urlaub -> als Abwesenheitstag werten (oder prüfen ob keine Arbeitszeit da ist)
-        r.timeCompensationHours.inMinutes > 60 || // Zeitausgleich > 1h
+        r.vacationHours.inMinutes > 60 || 
+        r.timeCompensationHours.inMinutes > 60 || 
         _isAbsence(r.description)
       );
       
-      // Volle Abwesenheitstage überspringen
+      // Nur wenn es Abwesenheit gibt UND KEINE Arbeit, ist es ein "voller Abwesenheitstag"
+      // (An halben Urlaubstagen wollen wir normal vergleichen)
+      final isFullAbsence = hasAbsence && !hasWork;
+      
+      // Volle Abwesenheitstage: Im Outlier-Modus alle Jira-Buchungen melden!
+      if (isFullAbsence && dayJira.isNotEmpty && outlierModeOnly) {
+        final outliers = dayJira.map((wl) => TimeDifference(
+          date: date,
+          type: TimeDifferenceType.jiraDuringBreak,
+          jiraTime: wl.started,
+          jiraDuration: wl.timeSpent,
+          issueKey: wl.issueKey,
+          details: 'Abwesenheitstag (${dayTimetac.first.description})',
+        )).toList();
+        
+        results.add(DayComparisonResult(
+          date: date,
+          differences: outliers,
+          hasTimetacData: true,
+          hasJiraData: true,
+        ));
+        continue;
+      }
+      
+      // Volle Abwesenheitstage im normalen Modus überspringen
       if (isFullAbsence) {
         continue;
       }
 
-      // Wochenende überspringen (es sei denn Jira hat Daten, das wird unten geprüft)
-      // Wir prüfen hier auf Daten, da wir im nächsten Schritt Fall 1-3 haben.
-      // Wenn Wochenende und KEIN Jira -> immer überspringen, egal ob Timetac Daten hat oder nicht (User Wunsch)
+      // Wochenende überspringen (es sei denn Jira hat Daten)
       if ((date.weekday == DateTime.saturday || date.weekday == DateTime.sunday) && dayJira.isEmpty) {
         continue;
       }
@@ -161,26 +206,47 @@ class TimeComparisonService {
         continue;
       }
       
-      // Fall 2: Jira hat Daten aber Timetac nicht -> Warnung
+      // Fall 2: Jira hat Daten aber Timetac nicht -> Warnung (alle Jira sind Outlier im outlierMode)
       if (!hasTimetacData && hasJiraData) {
-        results.add(DayComparisonResult(
-          date: date,
-          differences: [],
-          hasTimetacData: false,
-          hasJiraData: true,
-          jiraOnlyDay: true,
-        ));
+        if (outlierModeOnly) {
+          final outliers = dayJira.map((wl) => TimeDifference(
+            date: date,
+            type: TimeDifferenceType.jiraDuringBreak,
+            jiraTime: wl.started,
+            jiraDuration: wl.timeSpent,
+            issueKey: wl.issueKey,
+            details: 'Kein Timetac-Eintrag',
+          )).toList();
+          
+          results.add(DayComparisonResult(
+            date: date,
+            differences: outliers,
+            hasTimetacData: false,
+            hasJiraData: true,
+            jiraOnlyDay: true,
+          ));
+        } else {
+          results.add(DayComparisonResult(
+            date: date,
+            differences: [],
+            hasTimetacData: false,
+            hasJiraData: true,
+            jiraOnlyDay: true,
+          ));
+        }
         continue;
       }
       
-      // Fall 3: Timetac hat Daten aber Jira nicht -> Info hinzufügen
+      // Fall 3: Timetac hat Daten aber Jira nicht -> überspringen im Outlier-Modus
       if (hasTimetacData && !hasJiraData) {
-        results.add(DayComparisonResult(
-          date: date,
-          differences: [],
-          hasTimetacData: true,
-          hasJiraData: false,
-        ));
+        if (!outlierModeOnly) {
+          results.add(DayComparisonResult(
+            date: date,
+            differences: [],
+            hasTimetacData: true,
+            hasJiraData: false,
+          ));
+        }
         continue;
       }
       
@@ -197,7 +263,19 @@ class TimeComparisonService {
       
       // Fall 4: Beide haben Daten -> vergleichen
       final differences = <TimeDifference>[];
-      differences.addAll(_compareDay(date, dayTimetac, dayJira));
+      
+      if (outlierModeOnly) {
+        // Nur Ausreißer finden
+        differences.addAll(_findOutliers(date, dayTimetac, dayJira));
+      } else {
+        // Vollständiger Vergleich
+        differences.addAll(_compareDay(date, dayTimetac, dayJira));
+      }
+      
+      // Im Outlier-Modus nur Tage mit Problemen hinzufügen
+      if (outlierModeOnly && differences.isEmpty) {
+        continue;
+      }
       
       results.add(DayComparisonResult(
         date: date,
@@ -330,6 +408,132 @@ class TimeComparisonService {
     
     return differences;
   }
+  
+  /// Findet Jira-Worklogs die außerhalb der Timetac-Arbeitszeit liegen
+  /// oder während Pausen/Abwesenheiten gebucht wurden.
+  List<TimeDifference> _findOutliers(
+    DateTime date,
+    List<TimetacRow> timetacRows,
+    List<JiraWorklog> jiraWorklogs,
+  ) {
+    final outliers = <TimeDifference>[];
+    
+    // Timetac-Arbeitszeiten sammeln (ohne Abwesenheiten)
+    DateTime? timetacStart;
+    DateTime? timetacEnd;
+    final pauses = <TimeRange>[];
+    
+    for (final row in timetacRows) {
+      if (_isAbsence(row.description)) continue;
+      
+      if (row.start != null) {
+        if (timetacStart == null || row.start!.isBefore(timetacStart)) {
+          timetacStart = row.start;
+        }
+      }
+      if (row.end != null) {
+        if (timetacEnd == null || row.end!.isAfter(timetacEnd)) {
+          timetacEnd = row.end;
+        }
+      }
+      
+      // Pausen sammeln
+      pauses.addAll(row.pauses);
+    }
+    
+    if (timetacStart == null || timetacEnd == null) {
+      // Keine Arbeitszeit gefunden - alle Jira-Einträge sind Ausreißer
+      return jiraWorklogs.map((wl) => TimeDifference(
+        date: date,
+        type: TimeDifferenceType.jiraDuringBreak,
+        jiraTime: wl.started,
+        jiraDuration: wl.timeSpent,
+        issueKey: wl.issueKey,
+        details: 'Keine Timetac-Arbeitszeit',
+      )).toList();
+    }
+    
+    // Arbeitszeit-Minuten für schnellen Vergleich
+    final workStartMinutes = timetacStart.hour * 60 + timetacStart.minute;
+    final workEndMinutes = timetacEnd.hour * 60 + timetacEnd.minute;
+    
+    // Pause-Bereiche in Minuten
+    final pauseRanges = pauses.map((p) => (
+      start: p.start.hour * 60 + p.start.minute,
+      end: p.end.hour * 60 + p.end.minute,
+    )).toList();
+    
+    // Jeden Jira-Worklog prüfen
+    for (final wl in jiraWorklogs) {
+      final jiraStartMinutes = wl.started.hour * 60 + wl.started.minute;
+      final jiraEnd = wl.end;
+      final jiraEndMinutes = jiraEnd.hour * 60 + jiraEnd.minute;
+      
+      // Toleranz: 1 Minute
+      const tolerance = 1;
+      
+      // Prüfung 1: Jira startet vor Arbeitsbeginn
+      if (jiraStartMinutes < workStartMinutes - tolerance) {
+        outliers.add(TimeDifference(
+          date: date,
+          type: TimeDifferenceType.jiraBeforeWork,
+          timetacTime: timetacStart,
+          jiraTime: wl.started,
+          jiraDuration: wl.timeSpent,
+          issueKey: wl.issueKey,
+          details: 'Jira ${_formatTime(wl.started)} vor Arbeitsbeginn ${_formatTime(timetacStart)}',
+        ));
+        continue; // Nicht doppelt melden
+      }
+      
+      // Prüfung 2: Jira endet nach Arbeitsende
+      if (jiraEndMinutes > workEndMinutes + tolerance) {
+        outliers.add(TimeDifference(
+          date: date,
+          type: TimeDifferenceType.jiraAfterWork,
+          timetacTime: timetacEnd,
+          jiraTime: jiraEnd,
+          jiraDuration: wl.timeSpent,
+          issueKey: wl.issueKey,
+          details: 'Jira ${_formatTime(jiraEnd)} nach Arbeitsende ${_formatTime(timetacEnd)}',
+        ));
+        continue; // Nicht doppelt melden
+      }
+      
+      // Prüfung 3: Jira während Pause
+      for (final pause in pauseRanges) {
+        // Prüfe ob Jira-Worklog wirklich IN die Pause hineinragt
+        // NICHT: Jira endet genau wenn Pause beginnt (das ist OK)
+        // NICHT: Jira beginnt genau wenn Pause endet (das ist auch OK)
+        
+        // Jira startet WÄHREND der Pause (nicht am Rand)
+        final startsInPause = jiraStartMinutes >= pause.start && jiraStartMinutes < pause.end;
+        
+        // Jira endet WÄHREND der Pause (nicht am Rand)
+        final endsInPause = jiraEndMinutes > pause.start && jiraEndMinutes <= pause.end;
+        
+        // Jira umschließt die Pause komplett
+        final containsPause = jiraStartMinutes < pause.start && jiraEndMinutes > pause.end;
+        
+        if (startsInPause || endsInPause || containsPause) {
+          outliers.add(TimeDifference(
+            date: date,
+            type: TimeDifferenceType.jiraDuringBreak,
+            jiraTime: wl.started,
+            jiraDuration: wl.timeSpent,
+            issueKey: wl.issueKey,
+            details: 'Jira ${_formatTime(wl.started)}-${_formatTime(jiraEnd)} während Pause ${_formatMinutes(pause.start)}-${_formatMinutes(pause.end)}',
+          ));
+          break; // Nur einmal pro Worklog melden
+        }
+      }
+    }
+    
+    return outliers;
+  }
+  
+  String _formatTime(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  String _formatMinutes(int m) => '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
   
   /// Berechnet die Pausenzeit aus Jira-Worklogs (Lücken zwischen Einträgen)
   /// Arbeitet auf Minutenebene um Rundungsfehler durch Sekunden zu vermeiden

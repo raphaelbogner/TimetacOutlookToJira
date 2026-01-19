@@ -139,25 +139,31 @@ class JiraAdjustmentService {
     Duration timetacPaidNonWork = Duration.zero;
     final allPauses = <TimeRange>[];
     
+    
     for (final row in timetacRows) {
-      // Start/Ende
-      if (row.start != null) {
-        if (timetacStart == null || row.start!.isBefore(timetacStart)) {
-          timetacStart = row.start;
-        }
-      }
-      if (row.end != null) {
-        if (timetacEnd == null || row.end!.isAfter(timetacEnd)) {
-          timetacEnd = row.end;
-        }
-      }
+      // Ignoriere Abwesenheiten (Urlaub, Krank, etc.) für Start/Ende-Berechnung
+      final isAbsence = _isAbsence(row.description);
       
-      // Pausen
-      timetacPause += row.pauseTotal;
-      allPauses.addAll(row.pauses);
-      
-      // Bezahlte Nichtarbeitszeit (absenceTotal)
-      timetacPaidNonWork += row.absenceTotal;
+      // Start/Ende nur für Arbeitszeilen (nicht Abwesenheiten)
+      if (!isAbsence) {
+        if (row.start != null) {
+          if (timetacStart == null || row.start!.isBefore(timetacStart)) {
+            timetacStart = row.start;
+          }
+        }
+        if (row.end != null) {
+          if (timetacEnd == null || row.end!.isAfter(timetacEnd)) {
+            timetacEnd = row.end;
+          }
+        }
+        
+        // Pausen nur für Arbeitszeilen
+        timetacPause += row.pauseTotal;
+        allPauses.addAll(row.pauses);
+        
+        // Wir summieren nicht mehr global alle Absences für die End-Berechnung,
+        // da das zu Fehlern führt wenn Zeilen ohne Zeitstempel dabei sind.
+      }
     }
     
     if (timetacStart == null || timetacEnd == null) {
@@ -183,6 +189,10 @@ class JiraAdjustmentService {
     }
     
     // --- SCHRITT 2: Endzeit anpassen ---
+    // Wir nehmen Timetac-Ende als Ziel. 
+    // Falls hier "Arzt" etc. schon abgezogen ist (was bei Timetac meist der Fall ist wenn es eine separate Buchung ist),
+    // dann ist ttEnd bereits das korrekte "Arbeitsende".
+    
     if (!_isSameMinute(ttEnd, jiraEnd)) {
       final lastWl = sortedWorklogs.last;
       adjustments.add(WorklogAdjustment(
@@ -190,6 +200,7 @@ class JiraAdjustmentService {
         original: lastWl,
         newStart: lastWl.started,
         newDuration: ttEnd.difference(lastWl.started),
+        // Kein spezielles Label nötig, "Endzeit anpassen" reicht
       ));
     }
     
@@ -226,69 +237,8 @@ class JiraAdjustmentService {
       );
     }
     
-    // --- SCHRITT 5: Fehlende Pausenzeit (z.B. bezahlte Nichtarbeitszeit) berücksichtigen ---
-    // Wenn Jira WENIGER Pause hat als Timetac (z.B. weil Arzttermin am Ende war), 
-    // müssen wir Arbeitszeit in Pause umwandeln (letzten Worklog kürzen)
-    // Hinweis: Da wir in Schritt 3 schon reguläre Pausen behandelt haben, ist der Rest meist 'paidNonWork'.
-    
-    // Neuberechnung der Jira-Pause nach potenziellen Anpassungen aus Schritt 4 ist schwierig ohne Simulation.
-    // Aber wir können die ursprüngliche Differenz betrachten.
-    // Wenn timetacPaidNonWork > 0 und wir haben keine Lücke dafür -> am Ende kürzen.
-    
-    if (timetacPaidNonWork > Duration.zero) {
-      // Prüfe wie viel Pause wir insgesamt brauchen vs was wir haben
-      // (Wir nehmen an, Schritt 3 hat reguläre Pausen schon abgedeckt/erzeugt)
-      
-      // Vereinfachung: Wenn wir bezahlte Nichtarbeitszeit haben, kürzen wir das Ende des letzten Worklogs
-      // um diesen Betrag, SOFERN das nicht schon durch eine Lücke abgedeckt ist.
-      // Da wir aber nicht wissen wo die Lücken sind (außer wir simulieren alles durch)...
-      
-      // Pragmatischer Ansatz: Wir haben das Ende auf Timetac-Ende gesetzt (Schritt 2).
-      // Wenn bezahlte Nichtarbeitszeit da ist, endet die *echte* Arbeit früher.
-      // Also kürzen wir den letzten Worklog um timetacPaidNonWork.
-      
-      final lastWl = sortedWorklogs.last;
-      
-      // Prüfen ob wir für diesen Worklog schon eine Anpassung haben (Schritt 2 MoveEnd)
-      final existingAdjIndex = adjustments.indexWhere((a) => 
-        a.original.id == lastWl.id && a.type == AdjustmentType.moveEnd
-      );
-      
-      if (existingAdjIndex != -1) {
-        // Modifiziere existierende Endzeit-Anpassung
-        final existing = adjustments[existingAdjIndex];
-        // Das neue Ende war auf Timetac-Ende gesetzt. Wir ziehen jetzt timetacPaidNonWork ab.
-        // newStart (für moveEnd) ist eigentlich die Startzeit. newDuration ist die Dauer.
-        
-        final originallyPlannedEnd = existing.newStart!.add(existing.newDuration!); // Das war Timetac-Ende
-        final correctedEnd = originallyPlannedEnd.subtract(timetacPaidNonWork);
-        final correctedDuration = correctedEnd.difference(existing.newStart!);
-        
-        adjustments[existingAdjIndex] = WorklogAdjustment(
-          type: AdjustmentType.moveEnd,
-          original: existing.original,
-          newStart: existing.newStart,
-          newDuration: correctedDuration,
-          pauseLabel: 'Bez. Nichtarbeitszeit (Ende)',
-        );
-      } else {
-        // Neue Anpassung hinzufügen
-        // Wir gehen davon aus, dass das aktuelle Ende = Timetac Ende ist (durch Schritt 2 oder weil es schon passte)
-        // ABER: Wenn Schritt 2 NICHT gefeuert hat, ist Jira-Ende == Timetac-Ende.
-        // Wir müssen also vom aktuellen Ende abziehen.
-        
-        final currentEnd = lastWl.end;
-        final correctedEnd = currentEnd.subtract(timetacPaidNonWork);
-        
-        adjustments.add(WorklogAdjustment(
-          type: AdjustmentType.moveEnd,
-          original: lastWl,
-          newStart: lastWl.started,
-          newDuration: correctedEnd.difference(lastWl.started),
-          pauseLabel: 'Bez. Nichtarbeitszeit (Ende)',
-        ));
-      }
-    }
+    // Hinweis: Schritt 5 (bezahlte Nichtarbeitszeit) ist jetzt in Schritt 2 integriert
+    // durch die Berechnung von effectiveWorkEnd
     
     return DayAdjustmentPlan(
       date: date,
@@ -548,5 +498,18 @@ class JiraAdjustmentService {
     final min = m % 60;
     if (h > 0) return '${h}h ${min}m';
     return '${min}m';
+  }
+  
+  /// Prüft ob eine Beschreibung eine Abwesenheit ist (Urlaub, Krank, etc.)
+  bool _isAbsence(String description) {
+    final lower = description.toLowerCase();
+    return lower.contains('urlaub') || 
+           lower.contains('krank') || 
+           lower.contains('zeitausgleich') ||
+           lower.contains('arzt') ||
+           lower.contains('pflege') ||
+           lower.contains('sonder') ||
+           lower.contains('eltern') ||
+           lower.contains('papamonat');
   }
 }

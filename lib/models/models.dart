@@ -41,6 +41,11 @@ class SettingsModel {
   // title replacement rules (for Förderung)
   List<TitleReplacementRule> titleReplacementRules;
 
+  /// Zeitprüfungs-Modus:
+  /// - false: Vollständiger Vergleich (Start, Ende, Pause, Dauer)
+  /// - true: Nur Ausreißer (Jira außerhalb von Timetac oder in Pause/Abwesenheit)
+  bool timeCheckOutlierModeOnly;
+
   // ---- Feste, unveränderliche Defaults (öffentlich) ----
   static const List<String> defaultNonMeetingHintsList = <String>[
     'homeoffice',
@@ -104,6 +109,7 @@ class SettingsModel {
     this.noGitlabAccount = false,
     this.meetingRules = const [],
     this.titleReplacementRules = const [],
+    this.timeCheckOutlierModeOnly = false,
     String? nonMeetingHintsMultiline,
   }) : nonMeetingHintsMultiline = nonMeetingHintsMultiline ?? defaultNonMeetingHintsMultiline;
 
@@ -148,6 +154,7 @@ class SettingsModel {
         'nonMeetingHintsMultiline': nonMeetingHintsMultiline,
         'meetingRules': meetingRules.map((r) => r.toJson()).toList(),
         'titleReplacementRules': titleReplacementRules.map((r) => r.toJson()).toList(),
+        'timeCheckOutlierModeOnly': timeCheckOutlierModeOnly,
       };
 
   factory SettingsModel.fromJson(Map<String, dynamic> m) => SettingsModel(
@@ -188,6 +195,7 @@ class SettingsModel {
         titleReplacementRules: ((m['titleReplacementRules'] as List?) ?? const [])
             .map((e) => TitleReplacementRule.fromJson(e as Map<String, dynamic>))
             .toList(),
+        timeCheckOutlierModeOnly: (m['timeCheckOutlierModeOnly'] ?? false) as bool,
       );
 }
 

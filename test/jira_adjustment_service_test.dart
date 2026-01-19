@@ -392,7 +392,7 @@ void main() {
       expect(deletes[0].original.id, 'wl-short');
     });
 
-    test('handles paid non-work time (absenceTotal)', () {
+    test('ignores absence for end time calculation (trusts Timetac end)', () {
       final plan = service.generatePlan(
         date: DateTime(2024, 1, 15),
         timetacRows: [
@@ -407,14 +407,48 @@ void main() {
           createWorklog(
             id: 'wl-1',
             started: DateTime(2024, 1, 15, 8, 0),
-            duration: const Duration(hours: 9),
+            duration: const Duration(hours: 9), // Ends 17:00
           ),
         ],
       );
 
-      // Should have a moveEnd adjustment that accounts for absenceTotal
+      // Should NOT move end, because Timetac says end is 17:00.
+      // We don't blindly subtract absence anymore.
+      expect(plan.hasChanges, false);
+    });
+
+    test('targets timetac end directly even with absence (no double subtraction)', () {
+      // Scenario: User works until 12:39, then has Doctor appointment (2h).
+      // Timetac reports end at 12:39 (net work end).
+      // Jira is booked until 15:00.
+      // We should cut Jira to 12:39, NOT (12:39 - 2h).
+      final plan = service.generatePlan(
+        date: DateTime(2024, 1, 15),
+        timetacRows: [
+          createTimetacRow(
+            date: DateTime(2024, 1, 15),
+            start: DateTime(2024, 1, 15, 8, 00),
+            end: DateTime(2024, 1, 15, 12, 39),
+            absenceTotal: const Duration(hours: 2, minutes: 5),
+          ),
+        ],
+        jiraWorklogs: [
+          createWorklog(
+            id: 'wl-1',
+            started: DateTime(2024, 1, 15, 8, 00),
+            duration: const Duration(hours: 7), // Ends 15:00
+          ),
+        ],
+      );
+
       expect(plan.hasChanges, true);
-      expect(plan.timetacPaidNonWork, const Duration(hours: 1));
+      final moveEnd = plan.adjustments.where((a) => a.type == AdjustmentType.moveEnd).toList();
+      expect(moveEnd.length, 1);
+      
+      // New duration should reflect end at 12:39
+      // 12:39 - 08:00 = 4h 39m
+      final expectedDuration = DateTime(2024, 1, 15, 12, 39).difference(DateTime(2024, 1, 15, 8, 0));
+      expect(moveEnd[0].newDuration, expectedDuration);
     });
 
     test('handles multiple pauses in a day', () {

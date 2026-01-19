@@ -627,4 +627,208 @@ void main() {
       expect(result.allGood, true);
     });
   });
+
+  group('Outlier Mode', () {
+    test('reports Jira before work start', () {
+      final date = DateTime(2024, 1, 15);
+      final results = service.compare(
+        timetacRows: [
+          createTimetacRow(
+            date: date,
+            start: DateTime(2024, 1, 15, 8, 0),
+            end: DateTime(2024, 1, 15, 17, 0),
+          ),
+        ],
+        jiraWorklogs: {
+          '2024-01-15': [
+            createWorklog(
+              started: DateTime(2024, 1, 15, 7, 50), // 10 min too early
+              duration: const Duration(minutes: 30),
+            ),
+          ],
+        },
+        selectedDates: {date},
+        outlierModeOnly: true,
+      );
+      
+      expect(results.length, 1);
+      final diffs = results[0].differences;
+      expect(diffs.length, 1);
+      expect(diffs[0].type, TimeDifferenceType.jiraBeforeWork);
+    });
+
+    test('reports Jira after work end', () {
+      final date = DateTime(2024, 1, 15);
+      final results = service.compare(
+        timetacRows: [
+          createTimetacRow(
+            date: date,
+            start: DateTime(2024, 1, 15, 8, 0),
+            end: DateTime(2024, 1, 15, 17, 0),
+          ),
+        ],
+        jiraWorklogs: {
+          '2024-01-15': [
+            createWorklog(
+              started: DateTime(2024, 1, 15, 16, 30),
+              duration: const Duration(hours: 1), // Ends 17:30 (30 min too late)
+            ),
+          ],
+        },
+        selectedDates: {date},
+        outlierModeOnly: true,
+      );
+      
+      expect(results.length, 1);
+      final diffs = results[0].differences;
+      expect(diffs.length, 1);
+      expect(diffs[0].type, TimeDifferenceType.jiraAfterWork);
+    });
+
+    test('ignores small tolerance (1 min)', () {
+      final date = DateTime(2024, 1, 15);
+      final results = service.compare(
+        timetacRows: [
+          createTimetacRow(
+            date: date,
+            start: DateTime(2024, 1, 15, 8, 0),
+            end: DateTime(2024, 1, 15, 17, 0),
+          ),
+        ],
+        jiraWorklogs: {
+          '2024-01-15': [
+            createWorklog(
+              started: DateTime(2024, 1, 15, 7, 59), // 1 min early
+              duration: const Duration(hours: 9, minutes: 2), // Ends 17:01
+            ),
+          ],
+        },
+        selectedDates: {date},
+        outlierModeOnly: true,
+      );
+      
+      expect(results, isEmpty); // No outliers found
+    });
+    
+    test('reports Jira during break', () {
+      final date = DateTime(2024, 1, 15);
+      final results = service.compare(
+        timetacRows: [
+          createTimetacRow(
+            date: date,
+            start: DateTime(2024, 1, 15, 8, 0),
+            end: DateTime(2024, 1, 15, 17, 0),
+            pauses: [TimeRange(DateTime(2024, 1, 15, 12, 0), DateTime(2024, 1, 15, 12, 30))],
+            pauseTotal: const Duration(minutes: 30),
+          ),
+        ],
+        jiraWorklogs: {
+          '2024-01-15': [
+            createWorklog(
+              started: DateTime(2024, 1, 15, 12, 10), // Inside break
+              duration: const Duration(minutes: 10),
+            ),
+          ],
+        },
+        selectedDates: {date},
+        outlierModeOnly: true,
+      );
+      
+      expect(results.length, 1);
+      expect(results[0].differences.first.type, TimeDifferenceType.jiraDuringBreak);
+    });
+
+    test('allows Jira ending exactly at break start', () {
+      final date = DateTime(2024, 1, 15);
+      final results = service.compare(
+        timetacRows: [
+          createTimetacRow(
+            date: date,
+            start: DateTime(2024, 1, 15, 8, 0),
+            end: DateTime(2024, 1, 15, 17, 0),
+            pauses: [TimeRange(DateTime(2024, 1, 15, 12, 0), DateTime(2024, 1, 15, 12, 30))],
+          ),
+        ],
+        jiraWorklogs: {
+          '2024-01-15': [
+            createWorklog(
+              started: DateTime(2024, 1, 15, 11, 0), 
+              duration: const Duration(hours: 1), // Ends 12:00 (Break start)
+            ),
+          ],
+        },
+        selectedDates: {date},
+        outlierModeOnly: true,
+      );
+      
+      expect(results, isEmpty);
+    });
+
+    test('handles partial absence correctly (no full absence flag)', () {
+      final date = DateTime(2024, 1, 15);
+      final results = service.compare(
+        timetacRows: [
+          // Morning work
+          createTimetacRow(
+            date: date,
+            start: DateTime(2024, 1, 15, 8, 0),
+            end: DateTime(2024, 1, 15, 12, 0),
+          ),
+          // Afternoon vacation
+          createTimetacRow(
+            date: date,
+            vacationHours: const Duration(hours: 4),
+            description: 'Urlaub',
+          ),
+        ],
+        jiraWorklogs: {
+          '2024-01-15': [
+            // Worklog during valid work hours
+            createWorklog(
+              started: DateTime(2024, 1, 15, 8, 0),
+              duration: const Duration(hours: 4),
+            ),
+            // Worklog during vacation (Outlier!)
+            createWorklog(
+              started: DateTime(2024, 1, 15, 13, 0),
+              duration: const Duration(hours: 1),
+            ),
+          ],
+        },
+        selectedDates: {date},
+        outlierModeOnly: true,
+      );
+      
+      expect(results.length, 1);
+      // Should NOT be marked as full absence day, but find specific outliers
+      expect(results[0].differences.length, 1);
+      expect(results[0].differences.first.type, TimeDifferenceType.jiraAfterWork); // 13:00 is after 12:00 work end
+    });
+
+    test('flags full absence day', () {
+      final date = DateTime(2024, 1, 15);
+      final results = service.compare(
+        timetacRows: [
+          createTimetacRow(
+            date: date,
+            vacationHours: const Duration(hours: 8),
+            description: 'Urlaub',
+          ),
+        ],
+        jiraWorklogs: {
+          '2024-01-15': [
+            createWorklog(
+              started: DateTime(2024, 1, 15, 10, 0),
+              duration: const Duration(hours: 1),
+            ),
+          ],
+        },
+        selectedDates: {date},
+        outlierModeOnly: true,
+      );
+      
+      expect(results.length, 1);
+      expect(results[0].differences.first.details, contains('Abwesenheitstag'));
+    });
+  });
 }

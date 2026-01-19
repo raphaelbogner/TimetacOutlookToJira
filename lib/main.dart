@@ -1868,11 +1868,55 @@ class _HomePageState extends State<HomePage> {
                 icon: const Icon(Icons.send),
                 label: const Text('Buchen (Jira)'),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 64), // Mehr Abstand
               FilledButton.icon(
                 onPressed: canCompare ? () => _compareWithTimetac(context) : null,
                 icon: const Icon(Icons.compare_arrows),
                 label: const Text('Zeiten vergleichen'),
+              ),
+              const SizedBox(width: 8),
+              Switch(
+                value: state.settings.timeCheckOutlierModeOnly,
+                onChanged: canCompare ? (val) {
+                  setState(() {
+                    state.settings.timeCheckOutlierModeOnly = val;
+                  });
+                  state.savePrefs();
+                } : null,
+              ),
+              Text(
+                state.settings.timeCheckOutlierModeOnly ? 'Nur Ausreißer' : 'Vollständig',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: canCompare ? null : Colors.grey,
+                ),
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                tooltip: 'Info zu Vergleichsmodi',
+                icon: Icon(
+                  Icons.info_outline,
+                  size: 18,
+                  color: canCompare ? null : Colors.grey,
+                ),
+                onPressed: () {
+                  _showInfoDialog(
+                    'Vergleichsmodi',
+                    '🔍 Vollständig:\n'
+                    'Vergleicht alle Aspekte zwischen Timetac und Jira:\n'
+                    '• Arbeitsbeginn\n'
+                    '• Arbeitsende\n'
+                    '• Pausenzeiten\n'
+                    '• Netto-Arbeitszeit\n\n'
+                    '⚠️ Nur Ausreißer:\n'
+                    'Meldet nur Jira-Buchungen die problematisch sind:\n'
+                    '• Jira startet VOR dem Timetac-Arbeitsbeginn\n'
+                    '• Jira endet NACH dem Timetac-Arbeitsende\n'
+                    '• Jira während einer Pause gebucht\n'
+                    '• Jira an Abwesenheitstagen (Krank, Urlaub, etc.)\n\n'
+                    'Tipp: "Nur Ausreißer" ignoriert, wenn Jira später startet oder früher endet als Timetac.',
+                  );
+                },
               ),
             ]),
             if (!state.hasCsv || !state.hasIcs)
@@ -4186,6 +4230,9 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _busy = true;
       _log += '\n=== Zeiten vergleichen ===\n';
+      _log += state.settings.timeCheckOutlierModeOnly 
+          ? 'Modus: Nur Ausreißer (Jira außerhalb Timetac-Zeiten)\n'
+          : 'Modus: Vollständiger Vergleich\n';
     });
 
     try {
@@ -4249,6 +4296,7 @@ class _HomePageState extends State<HomePage> {
         timetacRows: state.timetac,
         jiraWorklogs: allJiraWorklogs,
         selectedDates: selectedDates,
+        outlierModeOnly: state.settings.timeCheckOutlierModeOnly,
       );
 
       setState(() {
@@ -4538,29 +4586,79 @@ class _HomePageState extends State<HomePage> {
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             const Divider(),
-            ...dayResult.differences.map((diff) => Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4.0),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 100,
-                    child: Text(diff.typeLabel, style: const TextStyle(fontWeight: FontWeight.w500)),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Row(
-                      children: [
-                        Text('Timetac: ', style: TextStyle(color: Colors.grey.shade600)),
-                        Text(diff.timetacValueString, style: const TextStyle(fontWeight: FontWeight.bold)),
-                        const SizedBox(width: 16),
-                        Text('Jira: ', style: TextStyle(color: Colors.grey.shade600)),
-                        Text(diff.jiraValueString, style: const TextStyle(fontWeight: FontWeight.bold)),
+            ...dayResult.differences.map((diff) {
+              // Outlier-Typen anders anzeigen (mit Ticket und Details)
+              final isOutlier = diff.type == TimeDifferenceType.jiraBeforeWork ||
+                                diff.type == TimeDifferenceType.jiraAfterWork ||
+                                diff.type == TimeDifferenceType.jiraDuringBreak;
+              
+              if (isOutlier) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4.0),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 100,
+                        child: Text(diff.typeLabel, style: const TextStyle(fontWeight: FontWeight.w500)),
+                      ),
+                      const SizedBox(width: 8),
+                      if (diff.issueKey != null) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.cyan.shade700,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(diff.issueKey!, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+                        ),
+                        const SizedBox(width: 8),
                       ],
-                    ),
+                      Text(
+                        diff.jiraTime != null 
+                            ? '${diff.jiraTime!.hour.toString().padLeft(2, '0')}:${diff.jiraTime!.minute.toString().padLeft(2, '0')}'
+                            : '',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      if (diff.details != null) ...[
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            diff.details!,
+                            style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
-                ],
-              ),
-            )),
+                );
+              }
+              
+              // Standard-Anzeige für normale Differenzen
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4.0),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 100,
+                      child: Text(diff.typeLabel, style: const TextStyle(fontWeight: FontWeight.w500)),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Text('Timetac: ', style: TextStyle(color: Colors.grey.shade600)),
+                          Text(diff.timetacValueString, style: const TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(width: 16),
+                          Text('Jira: ', style: TextStyle(color: Colors.grey.shade600)),
+                          Text(diff.jiraValueString, style: const TextStyle(fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
             
             // Pausen-Aufschlüsselung anzeigen wenn es Pausenunterschiede gibt
             if (hasPauseDiff && (dayResult.timetacPause > Duration.zero || dayResult.timetacPaidNonWork > Duration.zero)) ...[
