@@ -579,8 +579,13 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     // Check for updates on app start
-    _updateService.checkForUpdates().then((_) {
-      if (mounted) setState(() {});
+    _updateService.checkForUpdates().then((info) {
+      if (mounted) {
+        setState(() {});
+        if (info != null && info.updateAvailable) {
+          _showUpdateDialog(context);
+        }
+      }
     });
     _updateService.addListener(() {
       if (mounted) setState(() {});
@@ -1068,8 +1073,36 @@ class _HomePageState extends State<HomePage> {
 
     if (confirmed != true || !mounted) return;
 
+    // Show progress dialog
+    showDialog(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        title: const Text('Lade Update herunter...'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 16),
+            AnimatedBuilder(
+              animation: _updateService,
+              builder: (context, _) => Column(
+                children: [
+                  LinearProgressIndicator(value: _updateService.downloadProgress),
+                  const SizedBox(height: 8),
+                  Text('${(_updateService.downloadProgress * 100).toStringAsFixed(0)}%'),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
     // Start download and wait for completion
     final scriptPath = await _updateService.downloadAndExtract();
+    
+    // Close progress dialog
+    if (mounted) Navigator.of(ctx).pop();
 
     if (!mounted) return;
 
@@ -4448,6 +4481,7 @@ class _HomePageState extends State<HomePage> {
         date: dayResult.date,
         timetacRows: dayTimetac,
         jiraWorklogs: dayJira,
+        outlierModeOnly: s.timeCheckOutlierModeOnly,
       );
       
       if (plan.hasChanges) {
