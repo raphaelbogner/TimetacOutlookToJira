@@ -97,6 +97,24 @@ class AppState extends ChangeNotifier {
   List<GitlabCommit> gitlabCommits = [];
 
   DateTimeRange? range;
+  Set<DateTime> selectedDates = {};  // For individual day selection
+  bool dateSelectionRangeMode = true; // true = range, false = individual days
+  
+  /// Returns the effective selected dates based on the current mode
+  Set<DateTime> get effectiveSelectedDates {
+    if (dateSelectionRangeMode && range != null) {
+      final dates = <DateTime>{};
+      var d = range!.start;
+      while (!d.isAfter(range!.end)) {
+        dates.add(DateTime(d.year, d.month, d.day));
+        d = d.add(const Duration(days: 1));
+      }
+      return dates;
+    } else {
+      return selectedDates;
+    }
+  }
+  
   String? jiraAccountId;
 
   // ---- Theme ----
@@ -377,10 +395,9 @@ class AppState extends ChangeNotifier {
     }.toList()
       ..sort();
 
-    if (range != null) {
-      final s = DateTime(range!.start.year, range!.start.month, range!.start.day);
-      final e = DateTime(range!.end.year, range!.end.month, range!.end.day);
-      dates.retainWhere((d) => !d.isBefore(s) && !d.isAfter(e));
+    final selection = effectiveSelectedDates;
+    if (selection.isNotEmpty) {
+      dates.retainWhere((d) => selection.contains(DateTime(d.year, d.month, d.day)));
     }
 
     final out = <DayTotals>[];
@@ -1834,6 +1851,9 @@ class _HomePageState extends State<HomePage> {
       ..sort();
     final minDate = dates.isNotEmpty ? dates.first : DateTime.now();
     final maxDate = dates.isNotEmpty ? dates.last : DateTime.now();
+    
+    final isRangeMode = state.dateSelectionRangeMode;
+    final selectedCount = state.selectedDates.length;
 
     return Card(
       child: Padding(
@@ -1845,33 +1865,354 @@ class _HomePageState extends State<HomePage> {
             FilledButton.tonalIcon(
               onPressed: dates.isEmpty
                   ? null
-                  : () async {
-                      final picked = await showDateRangePicker(
-                        context: context,
-                        firstDate: minDate.subtract(const Duration(days: 365)),
-                        lastDate: maxDate.add(const Duration(days: 365)),
-                        initialDateRange: activeRange ?? DateTimeRange(start: minDate, end: maxDate),
-                        helpText: 'Bitte Zeitraum wählen',
-                        locale: const Locale('de', 'DE'),
-                      );
-                      if (picked != null) {
-                        setState(() {
-                          context.read<AppState>().range = picked;
-                          _drafts = [];
-                          _log += 'Zeitraum: ${picked.start} – ${picked.end}\n';
-                        });
-                      }
-                    },
-              icon: const Icon(Icons.calendar_today),
+                  : () => _showUnifiedDatePicker(context, minDate, maxDate),
+              icon: Icon(isRangeMode ? Icons.date_range : Icons.check_box_outlined),
               label: Text(
-                activeRange == null
-                    ? 'Zeitraum wählen'
-                    : '${DateFormat('dd.MM.yyyy').format(activeRange.start)} – '
-                        '${DateFormat('dd.MM.yyyy').format(activeRange.end)}',
+                isRangeMode
+                    ? (activeRange == null
+                        ? 'Zeitraum wählen'
+                        : '${DateFormat('dd.MM.yyyy').format(activeRange.start)} – '
+                            '${DateFormat('dd.MM.yyyy').format(activeRange.end)}')
+                    : (selectedCount == 0
+                        ? 'Tage auswählen'
+                        : '$selectedCount ${selectedCount == 1 ? 'Tag' : 'Tage'} ausgewählt'),
               ),
             ),
           ]),
         ]),
+      ),
+    );
+  }
+  
+  /// Shows a unified scrollable calendar dialog for selecting dates (range or individual days)
+  Future<void> _showUnifiedDatePicker(BuildContext ctx, DateTime minDate, DateTime maxDate) async {
+    final state = context.read<AppState>();
+    
+    // Mutable mode variable (can be toggled in dialog)
+    var isRangeMode = state.dateSelectionRangeMode;
+    
+    // For range mode: track start and end
+    DateTime? rangeStart = state.range?.start;
+    DateTime? rangeEnd = state.range?.end;
+    
+    // For individual mode: copy current selection
+    final tempSelection = Set<DateTime>.from(state.selectedDates);
+    
+    // Available dates from CSV/ICS
+    final availableDates = {
+      ...state.timetac.map((e) => DateTime(e.date.year, e.date.month, e.date.day)),
+      ...state.icsEvents.map((e) => DateTime(e.start.year, e.start.month, e.start.day)),
+    };
+    
+    final confirmed = await showDialog<bool>(
+      context: ctx,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          // Helper to get selected dates for display
+          Set<DateTime> getDisplayDates() {
+            if (isRangeMode) {
+              if (rangeStart != null && rangeEnd != null) {
+                final dates = <DateTime>{};
+                var d = rangeStart!;
+                while (!d.isAfter(rangeEnd!)) {
+                  dates.add(DateTime(d.year, d.month, d.day));
+                  d = d.add(const Duration(days: 1));
+                }
+                return dates;
+              } else if (rangeStart != null) {
+                return {rangeStart!}; // Only start selected so far
+              }
+              return {}; // Range mode but nothing selected yet
+            }
+            return tempSelection; // Individual mode
+          }
+          
+          final displayDates = getDisplayDates();
+          final statusText = isRangeMode
+              ? (rangeStart == null
+                  ? 'Start wählen...'
+                  : rangeEnd == null
+                      ? '${DateFormat('dd.MM').format(rangeStart!)} → Ende wählen...'
+                      : '${DateFormat('dd.MM').format(rangeStart!)} – ${DateFormat('dd.MM').format(rangeEnd!)}')
+              : '${displayDates.length} ausgewählt';
+          
+          return AlertDialog(
+            title: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Datum auswählen'),
+                Text(
+                  statusText,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 500,
+              height: 450,
+              child: Column(
+                children: [
+                  // Mode toggle inside dialog
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(value: true, label: Text('Zeitraum'), icon: Icon(Icons.date_range, size: 16)),
+                      ButtonSegment(value: false, label: Text('Einzeltage'), icon: Icon(Icons.touch_app, size: 16)),
+                    ],
+                    selected: {isRangeMode},
+                    onSelectionChanged: (selected) {
+                      setDialogState(() {
+                        isRangeMode = selected.first;
+                      });
+                    },
+                    style: ButtonStyle(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: WidgetStateProperty.all(const TextStyle(fontSize: 12)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Scrollable calendar
+                  Expanded(
+                    child: _buildScrollableMonthCalendar(
+                      minDate: minDate,
+                      maxDate: maxDate,
+                      availableDates: availableDates,
+                      selectedDates: displayDates,
+                onDateTap: (date) {
+                  setDialogState(() {
+                    if (isRangeMode) {
+                      // Range mode: first click = start, second click = end
+                      if (rangeStart == null || rangeEnd != null) {
+                        // Starting fresh or resetting
+                        rangeStart = date;
+                        rangeEnd = null;
+                      } else {
+                        // Setting end
+                        if (date.isBefore(rangeStart!)) {
+                          // Clicked before start, swap
+                          rangeEnd = rangeStart;
+                          rangeStart = date;
+                        } else {
+                          rangeEnd = date;
+                        }
+                      }
+                    } else {
+                      // Individual mode: toggle
+                      if (tempSelection.contains(date)) {
+                        tempSelection.remove(date);
+                      } else {
+                        tempSelection.add(date);
+                      }
+                    }
+                  });
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+            actions: [
+              if (!isRangeMode) ...[
+                TextButton(
+                  onPressed: () {
+                    setDialogState(() => tempSelection.clear());
+                  },
+                  child: const Text('Alle abwählen'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    setDialogState(() {
+                      tempSelection.addAll(availableDates);
+                    });
+                  },
+                  child: const Text('Alle auswählen'),
+                ),
+              ] else ...[
+                TextButton(
+                  onPressed: () {
+                    setDialogState(() {
+                      rangeStart = null;
+                      rangeEnd = null;
+                    });
+                  },
+                  child: const Text('Zurücksetzen'),
+                ),
+                // Placeholder for consistent button layout
+                const SizedBox(width: 90),
+              ],
+              const SizedBox(width: 16),
+              TextButton(
+                onPressed: () => Navigator.pop(dialogCtx, false),
+                child: const Text('Abbrechen'),
+              ),
+              FilledButton(
+                onPressed: (isRangeMode && (rangeStart == null || rangeEnd == null)) ||
+                           (!isRangeMode && tempSelection.isEmpty)
+                    ? null
+                    : () => Navigator.pop(dialogCtx, true),
+                child: const Text('Übernehmen'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    
+    if (confirmed == true && mounted) {
+      setState(() {
+        // Save the mode selection
+        state.dateSelectionRangeMode = isRangeMode;
+        
+        if (isRangeMode && rangeStart != null && rangeEnd != null) {
+          state.range = DateTimeRange(start: rangeStart!, end: rangeEnd!);
+          _drafts = [];
+          _log += 'Zeitraum: ${DateFormat('dd.MM.yyyy').format(rangeStart!)} – ${DateFormat('dd.MM.yyyy').format(rangeEnd!)}\n';
+        } else if (!isRangeMode) {
+          state.selectedDates = tempSelection;
+          state.notifyListeners();
+          _drafts = [];
+          _log += 'Einzeltage: ${tempSelection.length} Tage ausgewählt\n';
+        }
+      });
+    }
+  }
+  
+  /// Builds a scrollable calendar showing multiple months
+  Widget _buildScrollableMonthCalendar({
+    required DateTime minDate,
+    required DateTime maxDate,
+    required Set<DateTime> availableDates,
+    required Set<DateTime> selectedDates,
+    required void Function(DateTime) onDateTap,
+  }) {
+    // Generate list of months to display
+    final months = <DateTime>[];
+    var current = DateTime(minDate.year, minDate.month, 1);
+    final lastMonth = DateTime(maxDate.year, maxDate.month, 1);
+    while (!current.isAfter(lastMonth)) {
+      months.add(current);
+      current = DateTime(current.year, current.month + 1, 1);
+    }
+    
+    return ListView.builder(
+      itemCount: months.length,
+      itemBuilder: (context, index) {
+        final month = months[index];
+        return _buildMonthGrid(
+          month: month,
+          availableDates: availableDates,
+          selectedDates: selectedDates,
+          onDateTap: onDateTap,
+        );
+      },
+    );
+  }
+  
+  /// Builds a single month grid
+  Widget _buildMonthGrid({
+    required DateTime month,
+    required Set<DateTime> availableDates,
+    required Set<DateTime> selectedDates,
+    required void Function(DateTime) onDateTap,
+  }) {
+    final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
+    final firstWeekday = DateTime(month.year, month.month, 1).weekday; // 1=Mon, 7=Sun
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          child: Text(
+            DateFormat('MMMM yyyy', 'de_DE').format(month),
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+          ),
+        ),
+        // Weekday header - use same cell width as day cells
+        SizedBox(
+          width: 308, // 7 days × (40px + 4px margin) = 308px
+          child: Wrap(
+            children: ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']
+                .map((d) => Container(
+                      width: 40,
+                      height: 24,
+                      margin: const EdgeInsets.all(2),
+                      child: Center(
+                        child: Text(d, style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                      ),
+                    ))
+                .toList(),
+          ),
+        ),
+        const SizedBox(height: 4),
+        // Days grid
+        SizedBox(
+          width: 308, // 7 days × (40px + 4px margin) = 308px
+          child: Wrap(
+            children: [
+              // Empty cells for days before first of month
+              for (var i = 1; i < firstWeekday; i++)
+                Container(width: 40, height: 36, margin: const EdgeInsets.all(2)),
+              // Actual days
+              for (var day = 1; day <= daysInMonth; day++)
+                _buildDayCell(
+                  date: DateTime(month.year, month.month, day),
+                  availableDates: availableDates,
+                  selectedDates: selectedDates,
+                  onDateTap: onDateTap,
+                ),
+            ],
+          ),
+        ),
+        const Divider(),
+      ],
+    );
+  }
+  
+  /// Builds a single day cell
+  Widget _buildDayCell({
+    required DateTime date,
+    required Set<DateTime> availableDates,
+    required Set<DateTime> selectedDates,
+    required void Function(DateTime) onDateTap,
+  }) {
+    final normalizedDate = DateTime(date.year, date.month, date.day);
+    final isAvailable = availableDates.contains(normalizedDate);
+    final isSelected = selectedDates.contains(normalizedDate);
+    final isWeekend = date.weekday == 6 || date.weekday == 7;
+    
+    return GestureDetector(
+      onTap: isAvailable ? () => onDateTap(normalizedDate) : null,
+      child: Container(
+        width: 40,
+        height: 36,
+        margin: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? Theme.of(context).colorScheme.primary
+              : isAvailable
+                  ? Theme.of(context).colorScheme.surfaceContainerHighest
+                  : null,
+          borderRadius: BorderRadius.circular(6),
+          border: isAvailable && !isSelected
+              ? Border.all(color: Theme.of(context).colorScheme.outline.withOpacity(0.3))
+              : null,
+        ),
+        child: Center(
+          child: Text(
+            '${date.day}',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              color: isSelected
+                  ? Theme.of(context).colorScheme.onPrimary
+                  : isAvailable
+                      ? (isWeekend ? Colors.red[400] : null)
+                      : Colors.grey[400],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1880,7 +2221,9 @@ class _HomePageState extends State<HomePage> {
     final state = context.watch<AppState>();
     final locked = !state.isAllConfigured;
     final canCalculate = !locked && state.hasCsv && state.hasIcs;
-    final canCompare = state.hasCsv && state.range != null && !_busy;
+    final hasDatesSelected = (state.dateSelectionRangeMode && state.range != null) || 
+                              (!state.dateSelectionRangeMode && state.selectedDates.isNotEmpty);
+    final canCompare = state.hasCsv && hasDatesSelected && !_busy;
 
     return Card(
       child: Padding(
@@ -1907,21 +2250,22 @@ class _HomePageState extends State<HomePage> {
                 icon: const Icon(Icons.compare_arrows),
                 label: const Text('Zeiten vergleichen'),
               ),
-              const SizedBox(width: 8),
-              Switch(
-                value: state.settings.timeCheckOutlierModeOnly,
-                onChanged: canCompare ? (val) {
+              const SizedBox(width: 16),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('Vollständig'), icon: Icon(Icons.checklist, size: 16)),
+                  ButtonSegment(value: true, label: Text('Nur Ausreißer'), icon: Icon(Icons.warning_amber, size: 16)),
+                ],
+                selected: {state.settings.timeCheckOutlierModeOnly},
+                onSelectionChanged: canCompare ? (selected) {
                   setState(() {
-                    state.settings.timeCheckOutlierModeOnly = val;
+                    state.settings.timeCheckOutlierModeOnly = selected.first;
                   });
                   state.savePrefs();
                 } : null,
-              ),
-              Text(
-                state.settings.timeCheckOutlierModeOnly ? 'Nur Ausreißer' : 'Vollständig',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: canCompare ? null : Colors.grey,
+                style: ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  textStyle: WidgetStateProperty.all(const TextStyle(fontSize: 12)),
                 ),
               ),
               const SizedBox(width: 4),
@@ -3497,13 +3841,24 @@ class _HomePageState extends State<HomePage> {
 
       var csvDays = csvDaysSet.toList()..sort();
       late DateTime rangeStart, rangeEnd;
+      
+      final effectiveDates = state.effectiveSelectedDates;
 
-      if (state.range != null) {
-        rangeStart = DateTime(state.range!.start.year, state.range!.start.month, state.range!.start.day);
-        rangeEnd = DateTime(state.range!.end.year, state.range!.end.month, state.range!.end.day);
-        csvDays = csvDays.where((d) => !d.isBefore(rangeStart) && !d.isAfter(rangeEnd)).toList();
-        _log +=
-            'Zeitraum aktiv: ${DateFormat('dd.MM.yyyy').format(rangeStart)} – ${DateFormat('dd.MM.yyyy').format(rangeEnd)}\n';
+      if (effectiveDates.isNotEmpty) {
+        final sortedDates = effectiveDates.toList()..sort();
+        rangeStart = sortedDates.first;
+        rangeEnd = sortedDates.last;
+        
+        // In individual days mode, filter CSV days to only selected dates
+        if (!state.dateSelectionRangeMode) {
+          csvDays = csvDays.where((d) => effectiveDates.contains(d)).toList();
+        } else {
+          csvDays = csvDays.where((d) => !d.isBefore(rangeStart) && !d.isAfter(rangeEnd)).toList();
+        }
+        
+        _log += state.dateSelectionRangeMode
+            ? 'Zeitraum aktiv: ${DateFormat('dd.MM.yyyy').format(rangeStart)} – ${DateFormat('dd.MM.yyyy').format(rangeEnd)}\n'
+            : 'Einzeltage: ${effectiveDates.length} Tage ausgewählt\n';
       } else {
         rangeStart = csvDays.first;
         rangeEnd = csvDays.last;
@@ -4250,8 +4605,10 @@ class _HomePageState extends State<HomePage> {
   Future<void> _compareWithTimetac(BuildContext context) async {
     final state = context.read<AppState>();
     
-    if (state.range == null) {
-      await _showErrorDialog('Kein Zeitraum', 'Bitte wähle zuerst einen Zeitraum aus.');
+    // Check if dates are selected (works for both modes)
+    final selectedDates = state.effectiveSelectedDates;
+    if (selectedDates.isEmpty) {
+      await _showErrorDialog('Keine Tage ausgewählt', 'Bitte wähle zuerst einen Zeitraum oder einzelne Tage aus.');
       return;
     }
 
@@ -4269,19 +4626,14 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      final start = state.range!.start;
-      final end = state.range!.end;
+      // Logging für den ausgewählten Bereich
+      final sortedDates = selectedDates.toList()..sort();
+      final firstDate = sortedDates.first;
+      final lastDate = sortedDates.last;
       
-      setState(() => _log += 'Zeitraum: ${DateFormat('dd.MM.yyyy').format(start)} - ${DateFormat('dd.MM.yyyy').format(end)}\n');
-
-      // Alle Tage im Zeitraum sammeln
-      final selectedDates = <DateTime>{};
-      var current = DateTime(start.year, start.month, start.day);
-      final endDay = DateTime(end.year, end.month, end.day);
-      while (!current.isAfter(endDay)) {
-        selectedDates.add(current);
-        current = current.add(const Duration(days: 1));
-      }
+      setState(() => _log += state.dateSelectionRangeMode
+          ? 'Zeitraum: ${DateFormat('dd.MM.yyyy').format(firstDate)} - ${DateFormat('dd.MM.yyyy').format(lastDate)}\n'
+          : 'Einzeltage: ${selectedDates.length} Tage ausgewählt\n');
 
       setState(() => _log += 'Lade Jira Worklogs für ${selectedDates.length} Tage via JQL...\n');
 
@@ -4302,7 +4654,7 @@ class _HomePageState extends State<HomePage> {
         currentUserAccountId: state.jiraAccountId!,
       );
 
-      final allJiraWorklogs = await deleteService.fetchWorklogsForPeriod(start, end);
+      final allJiraWorklogs = await deleteService.fetchWorklogsForPeriod(firstDate, lastDate);
 
       // Debug: Zeige was geladen wurde
       int totalWorklogs = 0;

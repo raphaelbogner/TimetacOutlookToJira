@@ -1,7 +1,7 @@
 name: chronos
 description: Chronos - Time Tracking Efficiency
 publish_to: "none"
-version: 6.2.0+1
+version: 6.3.0+1
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
